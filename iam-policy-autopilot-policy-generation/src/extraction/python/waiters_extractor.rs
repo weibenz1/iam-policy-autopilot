@@ -7,11 +7,12 @@
 use std::path::Path;
 
 use crate::extraction::python::common::{ArgumentExtractor, ParameterFilter};
+use crate::extraction::sdk_model::ServiceDiscovery;
 use crate::extraction::shared::{ChainedWaiterCallInfo, WaiterCallInfo, WaiterCreationInfo};
 use crate::extraction::{
     AstWithSourceFile, Parameter, ParameterValue, SdkMethodCall, SdkMethodCallMetadata,
 };
-use crate::{Location, ServiceModelIndex};
+use crate::{Language, Location, ServiceModelIndex};
 use ast_grep_language::Python;
 
 // TODO: This should be refactored at a higher level, so this type can be removed.
@@ -325,10 +326,19 @@ impl<'a> WaitersExtractor<'a> {
                         self.service_index,
                     ),
                 };
-
-                // Create synthetic call with filtered wait() arguments
-                synthetic_calls.push(SdkMethodCall {
-                    name: wait_call.waiter_name().to_string(),
+                // We have to rename the operation to the snake_case method name for subsequently looking up the name during
+                // disambiguation. We lose the waiter name here.
+                //
+                // 1) We need the operation name to avoid the SdkMethodCall being filtered out during disambiguation.
+                // 2) Enrichment (and the SdkMethodCall type) currently does not perform waiter to operation resolution, which
+                //    means that a custom extractor (or agent or human user) needs to know how to map a waiter to its operation.
+                // TODO: Introduce a way to distinguish a waiter from a "regular" SDK call and store the waiter name here.
+                let method_name = ServiceDiscovery::operation_to_method_name(
+                    &service_method.operation_name,
+                    Language::Python,
+                );
+                let call = SdkMethodCall {
+                    name: method_name,
                     possible_services: vec![service_method.service_name.clone()],
                     metadata: Some(SdkMethodCallMetadata {
                         parameters,
@@ -338,7 +348,8 @@ impl<'a> WaitersExtractor<'a> {
                         // Use client receiver from get_waiter call
                         receiver: receiver.clone(),
                     }),
-                });
+                };
+                synthetic_calls.push(call);
             }
         }
 
@@ -484,7 +495,7 @@ mod tests {
             "instance_terminated".to_string(),
             vec![ServiceMethodRef {
                 service_name: "ec2".to_string(),
-                operation_name: "InstanceTerminated".to_string(),
+                operation_name: "DescribeInstances".to_string(),
             }],
         );
 
@@ -540,7 +551,7 @@ mod tests {
             "table_exists".to_string(),
             vec![ServiceMethodRef {
                 service_name: "dynamodb".to_string(),
-                operation_name: "TableExists".to_string(),
+                operation_name: "DescribeTable".to_string(),
             }],
         );
 
@@ -630,8 +641,8 @@ waiter.wait(InstanceIds=['i-1234567890abcdef0'])
 
         let calls = extractor.extract_waiter_method_calls(&ast);
 
-        // Should extract at least one call
-        assert!(!calls.is_empty());
+        assert_eq!(calls[0].name, "describe_instances");
+        assert_eq!(calls[0].possible_services, &["ec2"]);
     }
 
     #[test]
@@ -688,6 +699,7 @@ dynamodb_client.get_waiter('table_exists').wait(TableName='test-table')
         let calls = extractor.extract_waiter_method_calls(&ast);
 
         // Should extract at least one call for the chained waiter
-        assert!(!calls.is_empty());
+        assert_eq!(calls[0].name, "describe_table");
+        assert_eq!(calls[0].possible_services, &["dynamodb"]);
     }
 }
