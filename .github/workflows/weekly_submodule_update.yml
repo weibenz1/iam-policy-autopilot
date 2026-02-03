@@ -1,0 +1,135 @@
+name: Weekly Submodule Update Check
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Sunday at midnight UTC
+  workflow_dispatch:
+
+jobs:
+  check_versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      has_diff: ${{ steps.compare.outputs.has_diff }}
+      pypi_output: ${{ steps.pypi.outputs.output }}
+      built_output: ${{ steps.built.outputs.output }}
+    steps:
+    - name: Get PyPI version output
+      id: pypi
+      run: |
+        pip install iam-policy-autopilot
+        OUTPUT=$(iam-policy-autopilot --version --verbose)
+        echo "output<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        echo "PyPI version output:"
+        echo "$OUTPUT"
+
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Update submodules to latest tags
+      run: |
+        cd iam-policy-autopilot-policy-generation/resources/config/sdks/boto3
+        git fetch --tags
+        LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+        echo "Updating boto3 to $LATEST_TAG"
+        git checkout $LATEST_TAG
+
+        cd ../botocore-data
+        git fetch --tags
+        LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+        echo "Updating botocore-data to $LATEST_TAG"
+        git checkout $LATEST_TAG
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build from source
+      run: cargo build --release --workspace
+
+    - name: Get built version output
+      id: built
+      run: |
+        OUTPUT=$(./target/release/iam-policy-autopilot --version --verbose)
+        echo "output<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        echo "Built version output:"
+        echo "$OUTPUT"
+
+    - name: Compare versions
+      id: compare
+      run: |
+        PYPI_BOTO3=$(echo "${{ steps.pypi.outputs.output }}" | grep "boto3 version" | sed 's/.*commit_id=\([^,]*\).*/\1/')
+        PYPI_BOTOCORE=$(echo "${{ steps.pypi.outputs.output }}" | grep "botocore version" | sed 's/.*commit_id=\([^,]*\).*/\1/')
+        BUILT_BOTO3=$(echo "${{ steps.built.outputs.output }}" | grep "boto3 version" | sed 's/.*commit_id=\([^,]*\).*/\1/')
+        BUILT_BOTOCORE=$(echo "${{ steps.built.outputs.output }}" | grep "botocore version" | sed 's/.*commit_id=\([^,]*\).*/\1/')
+
+        echo "PyPI boto3: $PYPI_BOTO3"
+        echo "Built boto3: $BUILT_BOTO3"
+        echo "PyPI botocore: $PYPI_BOTOCORE"
+        echo "Built botocore: $BUILT_BOTOCORE"
+
+        if [[ "$PYPI_BOTO3" != "$BUILT_BOTO3" ]] || [[ "$PYPI_BOTOCORE" != "$BUILT_BOTOCORE" ]]; then
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+        else
+          echo "has_diff=false" >> $GITHUB_OUTPUT
+        fi
+
+  create_pr:
+    needs: check_versions
+    if: needs.check_versions.outputs.has_diff == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Update submodules and create PR
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd iam-policy-autopilot-policy-generation/resources/config/sdks/boto3
+        git fetch --tags
+        git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+
+        cd ../botocore-data
+        git fetch --tags
+        git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+
+        cd $GITHUB_WORKSPACE
+        BRANCH="auto/update-submodules-$(date +%Y%m%d)"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git checkout -b "$BRANCH"
+        git add -A
+        git commit -m "chore: update boto3/botocore submodules to latest tags"
+        git push origin "$BRANCH"
+
+        cat <<'BODY' > pr_body.md
+        Automated submodule update detected version differences:
+
+        **PyPI (current release):**
+        ```
+        ${{ needs.check_versions.outputs.pypi_output }}
+        ```
+
+        **Latest submodules (this PR):**
+        ```
+        ${{ needs.check_versions.outputs.built_output }}
+        ```
+        BODY
+
+        gh pr create \
+          --title "chore: update boto3/botocore submodules" \
+          --body-file pr_body.md \
+          --base main \
+          --head "$BRANCH"
