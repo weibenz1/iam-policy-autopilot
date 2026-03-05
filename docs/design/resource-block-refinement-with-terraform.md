@@ -2,9 +2,9 @@
 
 ## 1. Overview
 
-IAM Policy Autopilot generates least-privilege IAM policies by analyzing application source code for AWS SDK calls. By default, policies use wildcard (`*`) resource ARNs because the tool has no knowledge of which specific AWS resources the application operates on.
+IAM Policy Autopilot generates baseline IAM policies by analyzing application source code for AWS SDK calls. By default, policies use wildcard (`*`) resource ARNs because the tool has no knowledge of which specific AWS resources the application operates on.
 
-This design extends the `generate-policies` command with optional Terraform integration that replaces wildcard ARNs with concrete resource identifiers extracted from Terraform HCL configuration files and/or `terraform.tfstate` state files. The result is more restrictive, production-ready IAM policies that follow least-privilege best practices.
+This design extends the `generate-policies` command with optional Terraform integration that replaces wildcard ARNs with concrete resource identifiers extracted from Terraform HCL configuration files and/or `terraform.tfstate` state files. The result is more restrictive IAM policies that are closer to least-privilege.
 
 ### Example
 

@@ -101,7 +101,7 @@ fn extract_resource_block(
     let local_name = labels[1];
 
     // Only extract AWS provider resources
-    if !resource_type.starts_with("aws_") {
+    if !resource_type.starts_with(super::AWS_RESOURCE_PREFIX) {
         return None;
     }
 
@@ -261,32 +261,103 @@ pub(super) fn discover_tf_files(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::io::Write;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_parse_simple_s3_bucket() {
-        let hcl = r#"
+    // -----------------------------------------------------------------------
+    // Expected resource for parameterized content-parsing tests
+    // -----------------------------------------------------------------------
+
+    /// Describes one expected resource from HCL parsing.
+    struct ExpectedResource {
+        resource_type: &'static str,
+        local_name: &'static str,
+        /// (attr_key, expected_value) pairs to assert. If empty, no attribute checks.
+        attributes: Vec<(&'static str, AttributeValue)>,
+        /// Expected line number (None = don't check)
+        line_number: Option<usize>,
+    }
+
+    /// Shared assertion: parse HCL content and compare against expected resources.
+    fn assert_parse(
+        hcl: &str,
+        source_path: &str,
+        expected_count: usize,
+        expected_resources: &[ExpectedResource],
+    ) {
+        let result = parse_terraform_content(hcl, Path::new(source_path)).expect("should parse");
+        assert_eq!(
+            result.resources.len(),
+            expected_count,
+            "resource count mismatch for HCL input"
+        );
+
+        for expected in expected_resources {
+            let key = (
+                expected.resource_type.to_string(),
+                expected.local_name.to_string(),
+            );
+            let resource = result.resources.get(&key).unwrap_or_else(|| {
+                panic!(
+                    "expected resource {}.{} not found",
+                    expected.resource_type, expected.local_name
+                )
+            });
+            assert_eq!(resource.resource_type, expected.resource_type);
+            assert_eq!(resource.local_name, expected.local_name);
+
+            for (attr_key, expected_value) in &expected.attributes {
+                let actual = resource.attributes.get(*attr_key).unwrap_or_else(|| {
+                    panic!(
+                        "attribute '{}' not found on {}.{}",
+                        attr_key, expected.resource_type, expected.local_name
+                    )
+                });
+                assert_eq!(
+                    actual, expected_value,
+                    "attribute '{}' mismatch on {}.{}",
+                    attr_key, expected.resource_type, expected.local_name
+                );
+            }
+
+            if let Some(expected_line) = expected.line_number {
+                assert_eq!(
+                    resource.line_number,
+                    Some(expected_line),
+                    "line number mismatch for {}.{}",
+                    expected.resource_type,
+                    expected.local_name
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameterized HCL content parsing tests
+    // -----------------------------------------------------------------------
+
+    #[rstest]
+    // Simple S3 bucket with literal attribute
+    #[case(
+        "simple_s3_bucket",
+        r#"
 resource "aws_s3_bucket" "data_bucket" {
   bucket = "my-app-data"
 }
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        assert_eq!(result.resources.len(), 1);
-        let resource =
-            &result.resources[&(String::from("aws_s3_bucket"), String::from("data_bucket"))];
-        assert_eq!(resource.resource_type, "aws_s3_bucket");
-        assert_eq!(resource.local_name, "data_bucket");
-        assert_eq!(
-            resource.attributes.get("bucket"),
-            Some(&AttributeValue::Literal("my-app-data".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_multiple_resources() {
-        let hcl = r#"
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket",
+            local_name: "data_bucket",
+            attributes: vec![("bucket", AttributeValue::Literal("my-app-data".into()))],
+            line_number: None,
+        }],
+    )]
+    // Multiple resources: S3 + DynamoDB + Lambda
+    #[case(
+        "multiple_resources",
+        r#"
 resource "aws_s3_bucket" "bucket1" {
   bucket = "first-bucket"
 }
@@ -302,109 +373,197 @@ resource "aws_lambda_function" "func1" {
   runtime       = "python3.12"
   filename      = "lambda.zip"
 }
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        assert_eq!(result.resources.len(), 3);
-        assert!(result
-            .resources
-            .contains_key(&(String::from("aws_s3_bucket"), String::from("bucket1"))));
-        assert!(result
-            .resources
-            .contains_key(&(String::from("aws_dynamodb_table"), String::from("table1"))));
-        assert!(result
-            .resources
-            .contains_key(&(String::from("aws_lambda_function"), String::from("func1"))));
-    }
-
-    #[test]
-    fn test_non_aws_resources_ignored() {
-        let hcl = r#"
-resource "google_storage_bucket" "gcs" {
-  name = "my-gcs-bucket"
-}
-
-resource "aws_s3_bucket" "s3" {
-  bucket = "my-s3-bucket"
-}
-
-resource "azurerm_storage_account" "azure" {
-  name = "myazurestorage"
-}
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        assert_eq!(result.resources.len(), 1);
-        let s3 = &result.resources[&(String::from("aws_s3_bucket"), String::from("s3"))];
-        assert_eq!(s3.resource_type, "aws_s3_bucket");
-    }
-
-    #[test]
-    fn test_expression_preservation() {
-        let hcl = r#"
+"#,
+        3,
+        vec![
+            ExpectedResource {
+                resource_type: "aws_s3_bucket", local_name: "bucket1",
+                attributes: vec![("bucket", AttributeValue::Literal("first-bucket".into()))],
+                line_number: None,
+            },
+            ExpectedResource {
+                resource_type: "aws_dynamodb_table", local_name: "table1",
+                attributes: vec![("name", AttributeValue::Literal("my-table".into()))],
+                line_number: None,
+            },
+            ExpectedResource {
+                resource_type: "aws_lambda_function", local_name: "func1",
+                attributes: vec![("function_name", AttributeValue::Literal("my-function".into()))],
+                line_number: None,
+            },
+        ],
+    )]
+    // Non-AWS resources are ignored
+    #[case(
+        "non_aws_ignored",
+        r#"
+resource "google_storage_bucket" "gcs" { name = "my-gcs-bucket" }
+resource "aws_s3_bucket" "s3" { bucket = "my-s3-bucket" }
+resource "azurerm_storage_account" "azure" { name = "myazurestorage" }
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket", local_name: "s3",
+            attributes: vec![("bucket", AttributeValue::Literal("my-s3-bucket".into()))],
+            line_number: None,
+        }],
+    )]
+    // Interpolation preserved as Expression
+    #[case(
+        "expression_interpolation",
+        r#"
 resource "aws_s3_bucket" "dynamic_bucket" {
   bucket = "${var.prefix}-data-bucket"
 }
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        assert_eq!(result.resources.len(), 1);
-        let r = &result.resources[&(
-            String::from("aws_s3_bucket"),
-            String::from("dynamic_bucket"),
-        )];
-        let bucket_attr = r.attributes.get("bucket").unwrap();
-        assert!(
-            !bucket_attr.is_literal(),
-            "Interpolated string should be Expression, got: {bucket_attr:?}"
-        );
-        assert!(bucket_attr.as_str().contains("var.prefix"));
-    }
-
-    #[test]
-    fn test_variable_reference_is_expression() {
-        let hcl = r#"
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket", local_name: "dynamic_bucket",
+            attributes: vec![("bucket", AttributeValue::Expression("${var.prefix}-data-bucket".into()))],
+            line_number: None,
+        }],
+    )]
+    // Bare variable reference preserved as Expression
+    #[case(
+        "expression_bare_var",
+        r#"
 resource "aws_s3_bucket" "var_bucket" {
   bucket = var.bucket_name
 }
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        assert_eq!(result.resources.len(), 1);
-        let r = &result.resources[&(String::from("aws_s3_bucket"), String::from("var_bucket"))];
-        let bucket_attr = r.attributes.get("bucket").unwrap();
-        assert!(
-            !bucket_attr.is_literal(),
-            "Variable reference should be Expression, got: {bucket_attr:?}"
-        );
-    }
-
-    #[test]
-    fn test_data_and_other_blocks_ignored() {
-        let hcl = r#"
-resource "aws_s3_bucket" "bucket" {
-  bucket = "my-bucket"
-}
-
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket", local_name: "var_bucket",
+            attributes: vec![("bucket", AttributeValue::Expression("var.bucket_name".into()))],
+            line_number: None,
+        }],
+    )]
+    // Data, variable, output blocks are ignored
+    #[case(
+        "non_resource_blocks_ignored",
+        r#"
+resource "aws_s3_bucket" "bucket" { bucket = "my-bucket" }
 data "aws_iam_policy_document" "policy" {
   statement {
     actions = ["s3:GetObject"]
   }
 }
-
-variable "region" {
-  default = "us-east-1"
+variable "region" { default = "us-east-1" }
+output "bucket_arn" { value = aws_s3_bucket.bucket.arn }
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket", local_name: "bucket",
+            attributes: vec![("bucket", AttributeValue::Literal("my-bucket".into()))],
+            line_number: None,
+        }],
+    )]
+    // Numeric and bool attributes stored as Literal strings
+    #[case(
+        "numeric_and_bool_attrs",
+        r#"
+resource "aws_dynamodb_table" "t" {
+  name           = "my-table"
+  read_capacity  = 5
+  write_capacity = 10
+  stream_enabled = true
+}
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_dynamodb_table", local_name: "t",
+            attributes: vec![
+                ("name", AttributeValue::Literal("my-table".into())),
+                ("read_capacity", AttributeValue::Literal("5".into())),
+                ("stream_enabled", AttributeValue::Literal("true".into())),
+            ],
+            line_number: None,
+        }],
+    )]
+    // Line number tracking
+    #[case(
+        "line_numbers",
+        r#"
+resource "aws_s3_bucket" "first" {
+  bucket = "first-bucket"
 }
 
-output "bucket_arn" {
-  value = aws_s3_bucket.bucket.arn
+resource "aws_s3_bucket" "second" {
+  bucket = "second-bucket"
+}
+"#,
+        2,
+        vec![
+            ExpectedResource {
+                resource_type: "aws_s3_bucket", local_name: "first",
+                attributes: vec![], line_number: Some(2),
+            },
+            ExpectedResource {
+                resource_type: "aws_s3_bucket", local_name: "second",
+                attributes: vec![], line_number: Some(6),
+            },
+        ],
+    )]
+    // Comments skipped for line number resolution
+    #[case(
+        "comments_skipped",
+        r#"
+# resource "aws_s3_bucket" "b" {
+//   bucket = "commented-out"
+// }
+
+resource "aws_s3_bucket" "b" {
+  bucket = "real-bucket"
+}
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket", local_name: "b",
+            attributes: vec![("bucket", AttributeValue::Literal("real-bucket".into()))],
+            line_number: Some(6),
+        }],
+    )]
+    // Empty body resource
+    #[case(
+        "empty_body",
+        r#"
+resource "aws_s3_bucket" "empty" {}
+"#,
+        1,
+        vec![ExpectedResource {
+            resource_type: "aws_s3_bucket", local_name: "empty",
+            attributes: vec![],
+            line_number: None,
+        }],
+    )]
+    fn test_parse_hcl_content(
+        #[case] _name: &str,
+        #[case] hcl: &str,
+        #[case] expected_count: usize,
+        #[case] expected_resources: Vec<ExpectedResource>,
+    ) {
+        assert_parse(hcl, "main.tf", expected_count, &expected_resources);
+    }
+
+    // -----------------------------------------------------------------------
+    // Source file path preservation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_source_file_path_preserved() {
+        let hcl = r#"
+resource "aws_s3_bucket" "b" {
+  bucket = "test"
 }
 "#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        assert_eq!(result.resources.len(), 1);
-        assert!(result.warnings.is_empty());
+        let result = parse_terraform_content(hcl, Path::new("infra/main.tf")).expect("parse");
+        let r = &result.resources[&(String::from("aws_s3_bucket"), String::from("b"))];
+        assert_eq!(r.source_file, PathBuf::from("infra/main.tf"));
     }
+
+    // -----------------------------------------------------------------------
+    // Directory-based tests (require temp dirs, not parameterizable)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_parse_directory_with_tf_files() {
@@ -476,63 +635,6 @@ output "bucket_arn" {
     }
 
     #[test]
-    fn test_source_file_path_preserved() {
-        let hcl = r#"
-resource "aws_s3_bucket" "b" {
-  bucket = "test"
-}
-"#;
-        let path = Path::new("infra/main.tf");
-        let result = parse_terraform_content(hcl, path).expect("should parse");
-
-        let r = &result.resources[&(String::from("aws_s3_bucket"), String::from("b"))];
-        assert_eq!(r.source_file, PathBuf::from("infra/main.tf"));
-    }
-
-    #[test]
-    fn test_numeric_and_bool_attributes() {
-        let hcl = r#"
-resource "aws_dynamodb_table" "t" {
-  name           = "my-table"
-  read_capacity  = 5
-  write_capacity = 10
-  stream_enabled = true
-}
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("should parse");
-
-        let r = &result.resources[&(String::from("aws_dynamodb_table"), String::from("t"))];
-        let attrs = &r.attributes;
-        assert_eq!(
-            attrs.get("read_capacity"),
-            Some(&AttributeValue::Literal("5".to_string()))
-        );
-        assert_eq!(
-            attrs.get("stream_enabled"),
-            Some(&AttributeValue::Literal("true".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_line_number_tracking() {
-        let hcl = r#"
-resource "aws_s3_bucket" "first" {
-  bucket = "first-bucket"
-}
-
-resource "aws_s3_bucket" "second" {
-  bucket = "second-bucket"
-}
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("parse");
-
-        let first = &result.resources[&(String::from("aws_s3_bucket"), String::from("first"))];
-        let second = &result.resources[&(String::from("aws_s3_bucket"), String::from("second"))];
-        assert_eq!(first.line_number, Some(2));
-        assert_eq!(second.line_number, Some(6));
-    }
-
-    #[test]
     fn test_discover_skips_dot_terraform_dir() {
         let tmp = TempDir::new().expect("create temp dir");
 
@@ -546,34 +648,5 @@ resource "aws_s3_bucket" "second" {
         let files = discover_tf_files(tmp.path());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], main_tf);
-    }
-
-    #[test]
-    fn test_find_block_line_skips_comments() {
-        let hcl = r#"
-# resource "aws_s3_bucket" "b" {
-//   bucket = "commented-out"
-// }
-
-resource "aws_s3_bucket" "b" {
-  bucket = "real-bucket"
-}
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("parse");
-        let r = &result.resources[&(String::from("aws_s3_bucket"), String::from("b"))];
-        assert_eq!(r.line_number, Some(6), "Should skip commented-out lines");
-    }
-
-    #[test]
-    fn test_resource_with_empty_body() {
-        let hcl = r#"
-resource "aws_s3_bucket" "empty" {}
-"#;
-        let result = parse_terraform_content(hcl, Path::new("main.tf")).expect("parse");
-        assert_eq!(result.resources.len(), 1);
-        let r = &result.resources[&(String::from("aws_s3_bucket"), String::from("empty"))];
-        assert_eq!(r.resource_type, "aws_s3_bucket");
-        assert_eq!(r.local_name, "empty");
-        assert!(r.attributes.is_empty());
     }
 }

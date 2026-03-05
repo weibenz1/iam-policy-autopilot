@@ -760,6 +760,7 @@ mod tests {
     use crate::extraction::terraform::{AttributeValue, TerraformResource};
     use crate::Explanation;
     use crate::SdkMethodCall;
+    use rstest::rstest;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -1336,71 +1337,77 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Helper function tests
+    // Helper function tests (parameterized)
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_extract_service_from_action() {
-        assert_eq!(extract_service_from_action("s3:GetObject"), "s3");
-        assert_eq!(extract_service_from_action("dynamodb:PutItem"), "dynamodb");
-        assert_eq!(extract_service_from_action("nocolon"), "nocolon");
+    #[rstest]
+    #[case("s3:GetObject", "s3")]
+    #[case("dynamodb:PutItem", "dynamodb")]
+    #[case("nocolon", "nocolon")]
+    fn test_extract_service_from_action_cases(#[case] action: &str, #[case] expected: &str) {
+        assert_eq!(extract_service_from_action(action), expected);
     }
 
-    #[test]
-    fn test_placeholder_candidates_bucket_name() {
-        let candidates = placeholder_to_attribute_candidates("BucketName");
-        assert!(candidates.contains(&"bucket_name".to_string()));
-        assert!(candidates.contains(&"bucket".to_string()));
+    #[rstest]
+    #[case("BucketName",   &["bucket_name", "bucket", "name"])]
+    #[case("FunctionName", &["function_name", "function", "name"])]
+    #[case("TableName",    &["table_name", "table", "name"])]
+    fn test_placeholder_to_attribute_candidates(
+        #[case] placeholder: &str,
+        #[case] must_contain: &[&str],
+    ) {
+        let candidates = placeholder_to_attribute_candidates(placeholder);
+        for expected in must_contain {
+            assert!(
+                candidates.contains(&expected.to_string()),
+                "'{placeholder}' candidates should contain '{expected}', got: {candidates:?}"
+            );
+        }
     }
 
-    #[test]
-    fn test_placeholder_candidates_function_name() {
-        let candidates = placeholder_to_attribute_candidates("FunctionName");
-        assert!(candidates.contains(&"function_name".to_string()));
-        assert!(candidates.contains(&"function".to_string()));
-    }
-
-    #[test]
-    fn test_derive_naming_attribute_from_s3_arn() {
-        let patterns = vec!["arn:${Partition}:s3:::${BucketName}".to_string()];
-        let attrs = HashMap::from([(
-            "bucket".to_string(),
-            AttributeValue::Literal("x".to_string()),
-        )]);
+    #[rstest]
+    #[case("s3_arn",      &["arn:${Partition}:s3:::${BucketName}"],                                      &["bucket"],  Some("bucket"))]
+    #[case("dynamodb_arn", &["arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}"],        &["name"],    Some("name"))]
+    fn test_derive_naming_attribute(
+        #[case] _name: &str,
+        #[case] patterns: &[&str],
+        #[case] attr_keys: &[&str],
+        #[case] expected: Option<&str>,
+    ) {
+        let pattern_strings: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+        let attrs: HashMap<String, AttributeValue> = attr_keys
+            .iter()
+            .map(|k| (k.to_string(), AttributeValue::Literal("x".to_string())))
+            .collect();
         assert_eq!(
-            derive_naming_attribute(&patterns, &attrs),
-            Some("bucket".to_string())
+            derive_naming_attribute(&pattern_strings, &attrs),
+            expected.map(String::from),
         );
     }
 
-    #[test]
-    fn test_derive_naming_attribute_from_dynamodb_arn() {
-        let patterns =
-            vec!["arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}".to_string()];
-        let attrs = HashMap::from([("name".to_string(), AttributeValue::Literal("x".to_string()))]);
+    #[rstest]
+    #[case("single_resource", "arn:${Partition}:s3:::${BucketName}", false)]
+    #[case(
+        "double_resource",
+        "arn:${Partition}:s3:::${BucketName}/${ObjectName}",
+        true
+    )]
+    #[case(
+        "infra_not_counted",
+        "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}",
+        false
+    )]
+    fn test_multi_placeholder_detection(
+        #[case] _name: &str,
+        #[case] pattern: &str,
+        #[case] expected: bool,
+    ) {
+        let patterns = vec![pattern.to_string()];
         assert_eq!(
-            derive_naming_attribute(&patterns, &attrs),
-            Some("name".to_string())
+            arn_patterns_have_multiple_resource_placeholders(&patterns),
+            expected,
+            "multi-placeholder detection mismatch for '{_name}'"
         );
-    }
-
-    #[test]
-    fn test_multi_placeholder_detection_single() {
-        let patterns = vec!["arn:${Partition}:s3:::${BucketName}".to_string()];
-        assert!(!arn_patterns_have_multiple_resource_placeholders(&patterns));
-    }
-
-    #[test]
-    fn test_multi_placeholder_detection_double() {
-        let patterns = vec!["arn:${Partition}:s3:::${BucketName}/${ObjectName}".to_string()];
-        assert!(arn_patterns_have_multiple_resource_placeholders(&patterns));
-    }
-
-    #[test]
-    fn test_multi_placeholder_detection_infra_not_counted() {
-        let patterns =
-            vec!["arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}".to_string()];
-        assert!(!arn_patterns_have_multiple_resource_placeholders(&patterns));
     }
 
     #[test]

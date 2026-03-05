@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod hcl_parser;
 pub mod state_parser;
+
+/// Terraform AWS provider resource type prefix. Used to filter resources
+/// from multi-provider configurations — only types starting with this
+/// prefix are processed for IAM ARN binding.
+pub const AWS_RESOURCE_PREFIX: &str = "aws_";
 pub mod variable_resolver;
 
 /// Represents a Terraform attribute value, which may be a literal or an unresolvable expression.
