@@ -13,7 +13,27 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 /// Embedded `names_data.hcl` from the Terraform AWS provider.
-const NAMES_DATA_HCL: &str = include_str!("../../../resources/config/terraform/names_data.hcl");
+/// Sourced from the `terraform-provider-aws` submodule via git sparse-checkout.
+const NAMES_DATA_HCL: &str = include_str!(
+    "../../../resources/config/terraform/terraform-provider-aws/names/data/names_data.hcl"
+);
+
+// ---------------------------------------------------------------------------
+// HCL schema constants for `names_data.hcl` structure
+// ---------------------------------------------------------------------------
+
+/// Top-level block identifier: `service "label" { ... }`
+const HCL_BLOCK_SERVICE: &str = "service";
+/// Inner block: `sdk { arn_namespace = "..." }`
+const HCL_BLOCK_SDK: &str = "sdk";
+/// Attribute inside `sdk` block: the IAM ARN namespace (e.g., `"s3"`, `"dynamodb"`)
+const HCL_ATTR_ARN_NAMESPACE: &str = "arn_namespace";
+/// Inner block or top-level attribute: `resource_prefix { correct = "..." actual = "..." }`
+const HCL_BLOCK_RESOURCE_PREFIX: &str = "resource_prefix";
+/// Attribute inside `resource_prefix`: the canonical prefix (e.g., `"aws_s3_"`)
+const HCL_ATTR_CORRECT: &str = "correct";
+/// Attribute inside `resource_prefix`: optional regex pattern for actual resource types
+const HCL_ATTR_ACTUAL: &str = "actual";
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -192,7 +212,7 @@ impl TerraformServiceAndResourceResolver {
         // 1. Exact full-type lookup (e.g., "aws_canonical_user_id" → s3)
         if let Some(arn_ns) = self.exact_map.get(terraform_type) {
             let suffix = terraform_type
-                .strip_prefix("aws_")
+                .strip_prefix(crate::extraction::terraform::AWS_RESOURCE_PREFIX)
                 .unwrap_or(terraform_type);
             return Some((arn_ns.clone(), suffix.to_string()));
         }
@@ -204,7 +224,7 @@ impl TerraformServiceAndResourceResolver {
                     &terraform_type[correct_prefix.len()..]
                 } else {
                     terraform_type
-                        .strip_prefix("aws_")
+                        .strip_prefix(crate::extraction::terraform::AWS_RESOURCE_PREFIX)
                         .unwrap_or(terraform_type)
                 };
                 return Some((arn_ns.clone(), suffix.to_string()));
@@ -231,14 +251,15 @@ impl TerraformServiceAndResourceResolver {
 // ---------------------------------------------------------------------------
 
 /// Parse `names_data.hcl` into a list of [`ServiceEntry`] values.
+///
+/// # Panics
+///
+/// Panics if the HCL content cannot be parsed. Since `names_data.hcl` is
+/// embedded at compile time and validated by unit tests, a parse failure
+/// indicates a corrupted build and should never reach production.
 fn parse_names_data(content: &str) -> Vec<ServiceEntry> {
-    let body: hcl::Body = match hcl::from_str(content) {
-        Ok(body) => body,
-        Err(e) => {
-            log::error!("Failed to parse names_data.hcl: {e}");
-            return Vec::new();
-        }
-    };
+    let body: hcl::Body =
+        hcl::from_str(content).unwrap_or_else(|e| panic!("Failed to parse names_data.hcl: {e}"));
 
     let mut entries = Vec::new();
 
@@ -246,7 +267,7 @@ fn parse_names_data(content: &str) -> Vec<ServiceEntry> {
         let hcl::Structure::Block(block) = structure else {
             continue;
         };
-        if block.identifier.as_str() != "service" {
+        if block.identifier.as_str() != HCL_BLOCK_SERVICE {
             continue;
         }
 
@@ -263,10 +284,10 @@ fn parse_names_data(content: &str) -> Vec<ServiceEntry> {
         for inner in &block.body {
             match inner {
                 hcl::Structure::Block(inner_block) => match inner_block.identifier.as_str() {
-                    "sdk" => {
+                    HCL_BLOCK_SDK => {
                         for attr in &inner_block.body {
                             if let hcl::Structure::Attribute(a) = attr {
-                                if a.key.as_str() == "arn_namespace" {
+                                if a.key.as_str() == HCL_ATTR_ARN_NAMESPACE {
                                     if let hcl::Expression::String(s) = &a.expr {
                                         arn_namespace.clone_from(s);
                                     }
@@ -274,16 +295,16 @@ fn parse_names_data(content: &str) -> Vec<ServiceEntry> {
                             }
                         }
                     }
-                    "resource_prefix" => {
+                    HCL_BLOCK_RESOURCE_PREFIX => {
                         for attr in &inner_block.body {
                             if let hcl::Structure::Attribute(a) = attr {
                                 match a.key.as_str() {
-                                    "correct" => {
+                                    HCL_ATTR_CORRECT => {
                                         if let hcl::Expression::String(s) = &a.expr {
                                             correct.clone_from(s);
                                         }
                                     }
-                                    "actual" => {
+                                    HCL_ATTR_ACTUAL => {
                                         if let hcl::Expression::String(s) = &a.expr {
                                             actual = Some(s.clone());
                                         }
@@ -296,7 +317,7 @@ fn parse_names_data(content: &str) -> Vec<ServiceEntry> {
                     _ => {}
                 },
                 hcl::Structure::Attribute(attr) => {
-                    if attr.key.as_str() == "resource_prefix" {
+                    if attr.key.as_str() == HCL_BLOCK_RESOURCE_PREFIX {
                         if let hcl::Expression::String(s) = &attr.expr {
                             correct.clone_from(s);
                         }
@@ -443,6 +464,7 @@ fn try_expand_pattern(pattern: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     // --- parse_names_data tests ---
 
@@ -457,233 +479,121 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_names_data_s3_entry() {
-        let entries = parse_names_data(NAMES_DATA_HCL);
-        let s3 = entries.iter().find(|e| e.service_key == "s3").unwrap();
-        assert_eq!(s3.arn_namespace, "s3");
-        assert_eq!(s3.resource_prefix.correct, "aws_s3_");
-        assert!(s3.resource_prefix.actual.is_some());
-        assert!(s3
-            .resource_prefix
-            .actual
-            .as_ref()
-            .unwrap()
-            .contains("s3_bucket"));
+    #[should_panic(expected = "Failed to parse names_data.hcl")]
+    fn test_parse_names_data_panics_on_invalid_hcl() {
+        parse_names_data("this is {{ not valid HCL");
     }
 
-    #[test]
-    fn test_parse_names_data_simple_service() {
+    #[rstest]
+    #[case("s3", "s3", "aws_s3_", true)]
+    #[case("sqs", "sqs", "aws_sqs_", false)]
+    #[case("amp", "aps", "aws_amp_", true)]
+    fn test_parse_names_data_service_entry(
+        #[case] service_key: &str,
+        #[case] expected_arn_ns: &str,
+        #[case] expected_resource_prefix: &str,
+        #[case] has_actual: bool,
+    ) {
         let entries = parse_names_data(NAMES_DATA_HCL);
-        let sqs = entries.iter().find(|e| e.service_key == "sqs").unwrap();
-        assert_eq!(sqs.arn_namespace, "sqs");
-        assert_eq!(sqs.resource_prefix.correct, "aws_sqs_");
-        assert!(sqs.resource_prefix.actual.is_none());
-    }
-
-    #[test]
-    fn test_parse_names_data_retains_actual_pattern() {
-        let entries = parse_names_data(NAMES_DATA_HCL);
-        let amp = entries.iter().find(|e| e.service_key == "amp").unwrap();
-        assert_eq!(amp.arn_namespace, "aps");
-        assert_eq!(amp.resource_prefix.correct, "aws_amp_");
+        let entry = entries
+            .iter()
+            .find(|e| e.service_key == service_key)
+            .unwrap_or_else(|| panic!("service_key '{service_key}' not found in names_data"));
         assert_eq!(
-            amp.resource_prefix.actual.as_deref(),
-            Some("aws_prometheus_")
+            entry.arn_namespace, expected_arn_ns,
+            "arn_namespace mismatch for {service_key}"
+        );
+        assert_eq!(
+            entry.resource_prefix.correct, expected_resource_prefix,
+            "correct prefix mismatch for {service_key}"
+        );
+        assert_eq!(
+            entry.resource_prefix.actual.is_some(),
+            has_actual,
+            "actual pattern presence mismatch for {service_key}"
         );
     }
 
     // --- try_expand_pattern tests ---
 
-    #[test]
-    fn test_expand_plain_literal() {
-        let result = try_expand_pattern("aws_prometheus_").unwrap();
-        assert_eq!(result, vec!["aws_prometheus_"]);
-    }
-
-    #[test]
-    fn test_expand_simple_alternation() {
-        let result = try_expand_pattern("aws_(db_|rds_)").unwrap();
-        assert_eq!(result, vec!["aws_db_", "aws_rds_"]);
-    }
-
-    #[test]
-    fn test_expand_s3_alternation() {
-        let result =
-            try_expand_pattern("aws_(canonical_user_id|s3_bucket|s3_object|s3_directory_bucket)")
-                .unwrap();
+    #[rstest]
+    #[case("aws_prometheus_",                                                    Some(vec!["aws_prometheus_"]))]
+    #[case("aws_(db_|rds_)",                                                     Some(vec!["aws_db_", "aws_rds_"]))]
+    #[case("aws_(canonical_user_id|s3_bucket|s3_object|s3_directory_bucket)",     Some(vec!["aws_canonical_user_id", "aws_s3_bucket", "aws_s3_object", "aws_s3_directory_bucket"]))]
+    #[case("aws_cloudwatch_(?!(event_|log_|query_))", None)]
+    #[case("aws_a?lb(\\b|_listener|_target_group)", None)]
+    #[case("aws_(arn|billing_service_account|regions?)$", None)]
+    fn test_try_expand_pattern(#[case] pattern: &str, #[case] expected: Option<Vec<&str>>) {
+        let result = try_expand_pattern(pattern);
+        let expected_owned: Option<Vec<String>> =
+            expected.map(|v| v.into_iter().map(String::from).collect());
         assert_eq!(
-            result,
-            vec![
-                "aws_canonical_user_id",
-                "aws_s3_bucket",
-                "aws_s3_object",
-                "aws_s3_directory_bucket",
-            ]
+            result, expected_owned,
+            "try_expand_pattern mismatch for pattern: {pattern}"
         );
     }
 
-    #[test]
-    fn test_expand_rejects_negative_lookahead() {
-        assert!(try_expand_pattern("aws_cloudwatch_(?!(event_|log_|query_))").is_none());
+    // --- TypeResolver::resolve tests (parameterized) ---
+
+    /// Parameterized test for successful Terraform type → (service, suffix) resolution.
+    ///
+    /// Each case represents a different resolution strategy:
+    /// - Prefix match via `correct` prefix (e.g., aws_sqs_queue)
+    /// - Exact match via expanded `actual` pattern (e.g., aws_canonical_user_id)
+    /// - Prefix match via expanded `actual` alternation (e.g., aws_db_instance → rds)
+    /// - Regex fallback for complex patterns (e.g., aws_cloudwatch_metric_alarm)
+    #[rstest]
+    // Standard prefix matches
+    #[case("aws_s3_bucket", "s3", "bucket")]
+    #[case("aws_dynamodb_table", "dynamodb", "table")]
+    #[case("aws_lambda_function", "lambda", "function")]
+    #[case("aws_sqs_queue", "sqs", "queue")]
+    #[case("aws_s3control_bucket_policy", "s3", "bucket_policy")]
+    // Exact match via expanded `actual` alternation
+    #[case("aws_canonical_user_id", "s3", "canonical_user_id")]
+    #[case("aws_s3_directory_bucket", "s3", "directory_bucket")]
+    // Prefix match via expanded `actual` alternation
+    #[case("aws_db_instance", "rds", "instance")]
+    #[case("aws_rds_cluster", "rds", "cluster")]
+    #[case("aws_prometheus_workspace", "aps", "workspace")]
+    #[case("aws_api_gateway_rest_api", "apigateway", "rest_api")]
+    #[case("aws_dx_connection", "directconnect", "connection")]
+    #[case("aws_cloudwatch_event_rule", "events", "rule")]
+    #[case("aws_elb", "elb", "elb")]
+    // Regex fallback matches
+    #[case("aws_cloudwatch_metric_alarm", "cloudwatch", "metric_alarm")]
+    #[case("aws_cloudwatch_log_group", "logs", "group")]
+    fn test_resolve_terraform_type(
+        #[case] terraform_type: &str,
+        #[case] expected_service: &str,
+        #[case] expected_resource_type: &str,
+    ) {
+        let resolver = TerraformServiceAndResourceResolver::global();
+        let (service, resource_type) = resolver
+            .resolve(terraform_type)
+            .unwrap_or_else(|| panic!("Failed to resolve '{terraform_type}'"));
+        assert_eq!(
+            service, expected_service,
+            "service mismatch for '{terraform_type}'"
+        );
+        assert_eq!(
+            resource_type, expected_resource_type,
+            "suffix mismatch for '{terraform_type}'"
+        );
     }
 
-    #[test]
-    fn test_expand_rejects_word_boundary() {
-        assert!(try_expand_pattern(r"aws_a?lb(\b|_listener|_target_group)").is_none());
-    }
-
-    #[test]
-    fn test_expand_rejects_dollar_anchor() {
-        assert!(try_expand_pattern("aws_(arn|billing_service_account|regions?)$").is_none());
-    }
-
-    // --- TypeResolver::resolve tests ---
-
-    #[test]
-    fn test_resolve_s3_bucket() {
-        let r = TerraformServiceAndResourceResolver::global();
-        let result = r.resolve("aws_s3_bucket").unwrap();
-        assert_eq!(result.0, "s3");
-        assert_eq!(result.1, "bucket");
-    }
-
-    #[test]
-    fn test_resolve_dynamodb_table() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_dynamodb_table")
-            .unwrap();
-        assert_eq!(result.0, "dynamodb");
-        assert_eq!(result.1, "table");
-    }
-
-    #[test]
-    fn test_resolve_lambda_function() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_lambda_function")
-            .unwrap();
-        assert_eq!(result.0, "lambda");
-        assert_eq!(result.1, "function");
-    }
-
-    #[test]
-    fn test_resolve_sqs_queue() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_sqs_queue")
-            .unwrap();
-        assert_eq!(result.0, "sqs");
-        assert_eq!(result.1, "queue");
-    }
-
-    #[test]
-    fn test_resolve_unknown_returns_none() {
-        let r = TerraformServiceAndResourceResolver::global();
-        assert!(r.resolve("google_storage_bucket").is_none());
-        assert!(r.resolve("not_a_resource").is_none());
-    }
-
-    #[test]
-    fn test_resolve_s3control_bucket_policy() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_s3control_bucket_policy")
-            .unwrap();
-        assert_eq!(result.0, "s3");
-        assert_eq!(result.1, "bucket_policy");
-    }
-
-    #[test]
-    fn test_resolve_s3_bucket_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_s3_bucket")
-            .unwrap();
-        assert_eq!(result.0, "s3");
-    }
-
-    #[test]
-    fn test_resolve_canonical_user_id_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_canonical_user_id")
-            .unwrap();
-        assert_eq!(result.0, "s3");
-    }
-
-    #[test]
-    fn test_resolve_s3_directory_bucket_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_s3_directory_bucket")
-            .unwrap();
-        assert_eq!(result.0, "s3");
-    }
-
-    #[test]
-    fn test_resolve_prometheus_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_prometheus_workspace")
-            .unwrap();
-        assert_eq!(result.0, "aps");
-    }
-
-    #[test]
-    fn test_resolve_api_gateway_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_api_gateway_rest_api")
-            .unwrap();
-        assert_eq!(result.0, "apigateway");
-    }
-
-    #[test]
-    fn test_resolve_rds_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_db_instance")
-            .unwrap();
-        assert_eq!(result.0, "rds");
-    }
-
-    #[test]
-    fn test_resolve_rds_prefix_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_rds_cluster")
-            .unwrap();
-        assert_eq!(result.0, "rds");
-    }
-
-    #[test]
-    fn test_resolve_cloudwatch_event_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_cloudwatch_event_rule")
-            .unwrap();
-        assert_eq!(result.0, "events");
-    }
-
-    #[test]
-    fn test_resolve_elb_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_elb")
-            .unwrap();
-        assert_eq!(result.0, "elb");
-    }
-
-    #[test]
-    fn test_resolve_dx_via_expanded_map() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_dx_connection")
-            .unwrap();
-        assert_eq!(result.0, "directconnect");
-    }
-
-    #[test]
-    fn test_resolve_cloudwatch_metric_alarm_via_regex() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_cloudwatch_metric_alarm")
-            .unwrap();
-        assert_eq!(result.0, "cloudwatch");
-    }
-
-    #[test]
-    fn test_resolve_cloudwatch_log_goes_to_logs() {
-        let result = TerraformServiceAndResourceResolver::global()
-            .resolve("aws_cloudwatch_log_group")
-            .unwrap();
-        assert_eq!(result.0, "logs");
+    /// Parameterized test for types that should NOT resolve.
+    #[rstest]
+    #[case("google_storage_bucket")]
+    #[case("not_a_resource")]
+    #[case("azurerm_storage_account")]
+    fn test_resolve_unknown_returns_none(#[case] terraform_type: &str) {
+        let resolver = TerraformServiceAndResourceResolver::global();
+        assert!(
+            resolver.resolve(terraform_type).is_none(),
+            "Expected None for '{terraform_type}', got {:?}",
+            resolver.resolve(terraform_type)
+        );
     }
 
     // --- TypeResolver internals ---

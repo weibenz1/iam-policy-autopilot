@@ -1,27 +1,97 @@
-//! Integration tests for the Terraform resource binding feature.
+//! Fixture-based integration tests for the Terraform resource binding feature.
 //!
-//! These tests verify the end-to-end pipeline: parsing Terraform HCL,
-//! resolving resources to IAM services, building resource bindings, and
-//! substituting concrete resource ARNs into enriched SDK calls.
+//! Each test scenario is a directory under `tests/resources/terraform_fixtures/`
+//! containing:
+//! - `.tf` files (the Terraform configuration input)
+//! - `expected.json` (the expected resolver bindings and ARN substitutions)
+//! - Optionally `terraform.tfstate` (for state-based tests)
+//! - Optionally `variables.tf`, `terraform.tfvars` (for variable resolution tests)
+//!
+//! The test harness loads the fixture, builds a `TerraformResourceResolver`,
+//! and asserts against the expected output using `assert_eq` on typed structures.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+use rstest::rstest;
+use serde::Deserialize;
+
 use iam_policy_autopilot_policy_generation::enrichment::terraform::resource_binder::TerraformResourceResolver;
-use iam_policy_autopilot_policy_generation::extraction::terraform::hcl_parser::parse_terraform_directory;
-use iam_policy_autopilot_policy_generation::extraction::terraform::state_parser::parse_terraform_state;
-use iam_policy_autopilot_policy_generation::extraction::terraform::{
-    AttributeValue, TerraformParseResult, TerraformResource,
-};
 use iam_policy_autopilot_policy_generation::ServiceReferenceLoader;
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Mock loader with ARN patterns for the services used in the sample fixtures.
-///
-/// Returns `(MockServer, ServiceReferenceLoader)`. The `MockServer` must be
-/// held alive (via `_server` binding) for the duration of the test — dropping
-/// it shuts down the HTTP endpoints the loader depends on.
+// ---------------------------------------------------------------------------
+// Fixture data model — deserialized from expected.json
+// ---------------------------------------------------------------------------
+
+/// Top-level fixture definition. All fields except `description` and `note`
+/// are validated by the test harness — there are no silently-ignored fields.
+#[derive(Debug, Deserialize)]
+struct ExpectedFixture {
+    #[allow(dead_code)]
+    description: Option<String>,
+    #[serde(default)]
+    use_state_file: bool,
+    /// Required — every fixture must declare expected resolver bindings.
+    expected_resolver: ExpectedResolver,
+    /// Required — completeness check ensures every binding has an ARN substitution entry.
+    #[serde(default)]
+    expected_arn_substitutions: Vec<ExpectedArnSubstitution>,
+    #[serde(default)]
+    expected_state_parse: Option<ExpectedStateParse>,
+    #[serde(default)]
+    expected_binding_explanations: Option<ExpectedBindingExplanations>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedResolver {
+    resource_group_count: usize,
+    bindings: Vec<ExpectedBinding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedBinding {
+    service: String,
+    resource_type: String,
+    binding_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedArnSubstitution {
+    service: String,
+    resource_type: String,
+    input_patterns: Vec<String>,
+    /// null means substitution should return None
+    expected_output: Option<Vec<String>>,
+    #[allow(dead_code)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedStateParse {
+    managed_resource_count: usize,
+    /// List of "type.name" keys that should NOT be present (data sources).
+    #[serde(default)]
+    excluded_keys: Vec<String>,
+    /// Exact ARN values keyed by "type.name".
+    #[serde(default)]
+    specific_arns: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedBindingExplanations {
+    /// Exact list of expected explanation ARNs (order-independent).
+    /// When present and non-empty, the test asserts the actual ARN set equals this set exactly.
+    expected_arns: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Mock service reference loader
+// ---------------------------------------------------------------------------
+
+/// Build a mock loader with ARN patterns for common AWS services.
 async fn mock_loader() -> (MockServer, ServiceReferenceLoader) {
     let mock_server = MockServer::start().await;
     let url = mock_server.uri();
@@ -29,11 +99,13 @@ async fn mock_loader() -> (MockServer, ServiceReferenceLoader) {
     Mock::given(method("GET"))
         .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"service": "s3",       "url": format!("{url}/s3.json")},
-            {"service": "dynamodb", "url": format!("{url}/dynamodb.json")},
-            {"service": "sqs",      "url": format!("{url}/sqs.json")},
-            {"service": "lambda",   "url": format!("{url}/lambda.json")},
-            {"service": "iam",      "url": format!("{url}/iam.json")}
+            {"service": "s3",         "url": format!("{url}/s3.json")},
+            {"service": "dynamodb",   "url": format!("{url}/dynamodb.json")},
+            {"service": "sqs",        "url": format!("{url}/sqs.json")},
+            {"service": "lambda",     "url": format!("{url}/lambda.json")},
+            {"service": "iam",        "url": format!("{url}/iam.json")},
+            {"service": "kinesis",    "url": format!("{url}/kinesis.json")},
+            {"service": "sns",        "url": format!("{url}/sns.json")}
         ])))
         .mount(&mock_server)
         .await;
@@ -42,7 +114,7 @@ async fn mock_loader() -> (MockServer, ServiceReferenceLoader) {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "Name": "s3", "Actions": [], "Resources": [
                 {"Name": "bucket", "ARNFormats": ["arn:${Partition}:s3:::${BucketName}"]},
-                {"Name": "object",  "ARNFormats": ["arn:${Partition}:s3:::${BucketName}/${ObjectName}"]}
+                {"Name": "object", "ARNFormats": ["arn:${Partition}:s3:::${BucketName}/${ObjectName}"]}
             ]
         })))
         .mount(&mock_server).await;
@@ -79,6 +151,22 @@ async fn mock_loader() -> (MockServer, ServiceReferenceLoader) {
         })))
         .mount(&mock_server).await;
 
+    Mock::given(method("GET")).and(path("/kinesis.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "Name": "kinesis", "Actions": [], "Resources": [
+                {"Name": "stream", "ARNFormats": ["arn:${Partition}:kinesis:${Region}:${Account}:stream/${StreamName}"]}
+            ]
+        })))
+        .mount(&mock_server).await;
+
+    Mock::given(method("GET")).and(path("/sns.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "Name": "sns", "Actions": [], "Resources": [
+                {"Name": "topic", "ARNFormats": ["arn:${Partition}:sns:${Region}:${Account}:${TopicName}"]}
+            ]
+        })))
+        .mount(&mock_server).await;
+
     let loader = ServiceReferenceLoader::empty_loader_for_tests()
         .unwrap()
         .with_mapping_url(url);
@@ -86,549 +174,305 @@ async fn mock_loader() -> (MockServer, ServiceReferenceLoader) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: path to the sample fixtures
+// Helpers
 // ---------------------------------------------------------------------------
-fn sample_dir() -> PathBuf {
+
+fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("resources")
-        .join("terraform_sample")
+        .join("terraform_fixtures")
 }
 
-fn vars_sample_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("resources")
-        .join("terraform_vars_sample")
+fn load_expected(fixture_name: &str) -> ExpectedFixture {
+    let path = fixtures_dir().join(fixture_name).join("expected.json");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+    serde_json::from_str(&content)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
+}
+
+fn fixture_dir(name: &str) -> PathBuf {
+    fixtures_dir().join(name)
+}
+
+/// Build a resolver from a fixture, using mock loader and optional state file.
+async fn build_resolver(
+    fixture_name: &str,
+    expected: &ExpectedFixture,
+    server_and_loader: &(MockServer, ServiceReferenceLoader),
+) -> TerraformResourceResolver {
+    let dir = fixture_dir(fixture_name);
+    let tfstate_path = dir.join("terraform.tfstate");
+    let tfstate_ref = if expected.use_state_file && tfstate_path.exists() {
+        Some(tfstate_path)
+    } else {
+        None
+    };
+
+    TerraformResourceResolver::from_directory(&dir, tfstate_ref.as_ref(), &server_and_loader.1)
+        .await
+        .unwrap_or_else(|e| panic!("[{fixture_name}] Failed to build resolver: {e}"))
+}
+
+/// Extract sorted binding names from the resolver for a given (service, type) key.
+fn actual_binding_names(
+    resolver: &TerraformResourceResolver,
+    service: &str,
+    resource_type: &str,
+) -> Vec<String> {
+    let key = (service.to_string(), resource_type.to_string());
+    match resolver.resources().get(&key) {
+        Some(resources) => {
+            let mut names: Vec<String> = resources
+                .iter()
+                .map(|r| r.binding_name.clone().unwrap_or_else(|| "*".to_string()))
+                .collect();
+            names.sort();
+            names
+        }
+        None => vec![],
+    }
 }
 
 // ===================================================================
-// 1. Terraform Parsing Integration Tests
+// Fixture-driven resolver + ARN substitution tests (unified)
 // ===================================================================
 
-#[test]
-fn test_parse_sample_terraform_directory() {
-    let result = parse_terraform_directory(&sample_dir()).expect("should parse sample dir");
+/// Test resolver bindings AND ARN substitutions for every fixture.
+#[rstest]
+#[case("basic_multi_resource")]
+#[case("variable_resolution")]
+#[case("mixed_providers")]
+#[case("expression_unresolvable")]
+#[case("sub_resource_fallback")]
+#[case("mixed_concrete_and_expression")]
+#[case("multi_service_real_world")]
+#[case("state_precedence")]
+#[tokio::test]
+async fn test_fixture(#[case] fixture_name: &str) {
+    let expected = load_expected(fixture_name);
+    let sl = mock_loader().await;
+    let resolver = build_resolver(fixture_name, &expected, &sl).await;
 
-    assert!(
-        result.resources.len() >= 5,
-        "Expected at least 5 resources, got {}",
-        result.resources.len()
+    // --- 1. Verify resolver bindings ---
+    let expected_resolver = &expected.expected_resolver;
+
+    assert_eq!(
+        resolver.len(),
+        expected_resolver.resource_group_count,
+        "[{fixture_name}] resource group count mismatch"
     );
 
-    let types: Vec<&str> = result
-        .resources
-        .values()
-        .map(|r| r.resource_type.as_str())
-        .collect();
-    assert!(types.contains(&"aws_s3_bucket"), "Missing aws_s3_bucket");
-    assert!(
-        types.contains(&"aws_dynamodb_table"),
-        "Missing aws_dynamodb_table"
-    );
-    assert!(types.contains(&"aws_sqs_queue"), "Missing aws_sqs_queue");
-    assert!(
-        types.contains(&"aws_lambda_function"),
-        "Missing aws_lambda_function"
-    );
-    assert!(types.contains(&"aws_iam_role"), "Missing aws_iam_role");
+    for binding in &expected_resolver.bindings {
+        let actual = actual_binding_names(&resolver, &binding.service, &binding.resource_type);
+        let mut expected_names = binding.binding_names.clone();
+        expected_names.sort();
 
-    assert!(
-        result.warnings.is_empty(),
-        "Unexpected warnings: {:?}",
-        result.warnings
-    );
-}
+        assert_eq!(
+            actual, expected_names,
+            "[{fixture_name}] binding names mismatch for {}.{}",
+            binding.service, binding.resource_type
+        );
+    }
 
-#[test]
-fn test_parse_extracts_correct_bucket_names() {
-    let result = parse_terraform_directory(&sample_dir()).expect("parse");
-
-    let buckets: Vec<&TerraformResource> = result
-        .resources
-        .values()
-        .filter(|r| r.resource_type == "aws_s3_bucket")
-        .collect();
-
-    assert_eq!(buckets.len(), 2);
-
-    let bucket_names: Vec<&str> = buckets
+    // --- 2. Completeness check: every binding has an ARN substitution entry ---
+    let arn_sub_keys: std::collections::HashSet<(&str, &str)> = expected
+        .expected_arn_substitutions
         .iter()
-        .filter_map(|r| r.attributes.get("bucket"))
-        .map(|v| v.as_str())
+        .map(|s| (s.service.as_str(), s.resource_type.as_str()))
         .collect();
 
-    assert!(bucket_names.contains(&"my-app-data-bucket"));
-    assert!(bucket_names.contains(&"my-app-logs-bucket"));
-}
+    for binding in &expected_resolver.bindings {
+        assert!(
+            arn_sub_keys.contains(&(binding.service.as_str(), binding.resource_type.as_str())),
+            "[{fixture_name}] binding {}.{} has no corresponding entry in expected_arn_substitutions — \
+             add one to ensure ARN substitution is tested",
+            binding.service, binding.resource_type
+        );
+    }
 
-#[test]
-fn test_parse_extracts_dynamodb_table_name() {
-    let result = parse_terraform_directory(&sample_dir()).expect("parse");
+    // --- 3. Verify ARN substitutions ---
+    for sub in &expected.expected_arn_substitutions {
+        let actual = resolver.substitute_arn_patterns_for_test(
+            &sub.service,
+            &sub.resource_type,
+            &sub.input_patterns,
+        );
 
-    let tables: Vec<&TerraformResource> = result
-        .resources
-        .values()
-        .filter(|r| r.resource_type == "aws_dynamodb_table")
-        .collect();
+        match (&actual, &sub.expected_output) {
+            (None, None) => {
+                // Both None — substitution returns None as expected
+            }
+            (Some(actual_arns), Some(expected_arns)) => {
+                let actual_set: BTreeSet<&str> = actual_arns.iter().map(String::as_str).collect();
+                let expected_set: BTreeSet<&str> =
+                    expected_arns.iter().map(String::as_str).collect();
+                assert_eq!(
+                    actual_set, expected_set,
+                    "[{fixture_name}] ARN substitution mismatch for {}.{}\n  input:    {:?}\n  actual:   {:?}\n  expected: {:?}",
+                    sub.service, sub.resource_type,
+                    sub.input_patterns, actual_arns, expected_arns
+                );
+            }
+            (None, Some(expected_arns)) => {
+                panic!(
+                    "[{fixture_name}] ARN substitution for {}.{} returned None, expected {:?}",
+                    sub.service, sub.resource_type, expected_arns
+                );
+            }
+            (Some(actual_arns), None) => {
+                panic!(
+                    "[{fixture_name}] ARN substitution for {}.{} returned {:?}, expected None",
+                    sub.service, sub.resource_type, actual_arns
+                );
+            }
+        }
+    }
 
-    assert_eq!(tables.len(), 1);
-    assert_eq!(
-        tables[0].attributes.get("name"),
-        Some(&AttributeValue::Literal("users-table".to_string()))
-    );
-}
+    // --- 4. Verify binding explanations (if specified) ---
+    if let Some(ref expl_expected) = expected.expected_binding_explanations {
+        let explanations = resolver.build_binding_explanations();
 
-// ===================================================================
-// 2. Resource Resolver Integration Tests
-// ===================================================================
+        // Exact ARN set comparison
+        let actual_arns: BTreeSet<&str> = explanations.iter().map(|e| e.arn.as_str()).collect();
+        let expected_arns: BTreeSet<&str> = expl_expected
+            .expected_arns
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            actual_arns, expected_arns,
+            "[{fixture_name}] binding explanation ARN set mismatch"
+        );
 
-#[tokio::test]
-async fn test_resource_resolver_from_sample_terraform() {
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(&sample_dir(), None, &loader)
-        .await
-        .expect("should resolve");
-
-    assert!(!resolver.is_empty(), "Resolver should have resources");
-
-    // Check S3 buckets
-    let s3_buckets = &resolver.resources()[&("s3".to_string(), "bucket".to_string())];
-    assert_eq!(s3_buckets.len(), 2);
-    let bucket_names: Vec<&str> = s3_buckets
-        .iter()
-        .filter_map(|r| r.binding_name.as_deref())
-        .collect();
-    assert!(bucket_names.contains(&"my-app-data-bucket"));
-    assert!(bucket_names.contains(&"my-app-logs-bucket"));
-
-    // Check DynamoDB table
-    let ddb_tables = &resolver.resources()[&("dynamodb".to_string(), "table".to_string())];
-    assert_eq!(ddb_tables.len(), 1);
-    assert_eq!(ddb_tables[0].binding_name.as_deref(), Some("users-table"));
-
-    // Check SQS queue
-    let sqs_queues = &resolver.resources()[&("sqs".to_string(), "queue".to_string())];
-    assert_eq!(sqs_queues.len(), 1);
-    assert_eq!(
-        sqs_queues[0].binding_name.as_deref(),
-        Some("task-processing-queue")
-    );
-
-    // Check Lambda function
-    let lambda_fns = &resolver.resources()[&("lambda".to_string(), "function".to_string())];
-    assert_eq!(lambda_fns.len(), 1);
-    assert_eq!(
-        lambda_fns[0].binding_name.as_deref(),
-        Some("data-processor")
-    );
-
-    // Check IAM role
-    let iam_roles = &resolver.resources()[&("iam".to_string(), "role".to_string())];
-    assert_eq!(iam_roles.len(), 1);
-    assert_eq!(
-        iam_roles[0].binding_name.as_deref(),
-        Some("data-processor-role")
-    );
-}
-
-#[tokio::test]
-async fn test_arn_substitution_s3_bucket() {
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(&sample_dir(), None, &loader)
-        .await
-        .expect("resolve");
-
-    let patterns = vec!["arn:${Partition}:s3:::${BucketName}".to_string()];
-    let substituted = resolver
-        .substitute_arn_patterns_for_test("s3", "bucket", &patterns)
-        .expect("should substitute");
-
-    assert_eq!(substituted.len(), 2);
-    assert!(substituted.contains(&"arn:${Partition}:s3:::my-app-data-bucket".to_string()));
-    assert!(substituted.contains(&"arn:${Partition}:s3:::my-app-logs-bucket".to_string()));
-}
-
-#[tokio::test]
-async fn test_arn_substitution_dynamodb_table() {
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(&sample_dir(), None, &loader)
-        .await
-        .expect("resolve");
-
-    let patterns =
-        vec!["arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}".to_string()];
-    let substituted = resolver
-        .substitute_arn_patterns_for_test("dynamodb", "table", &patterns)
-        .expect("should substitute");
-
-    assert_eq!(substituted.len(), 1);
-    assert_eq!(
-        substituted[0],
-        "arn:${Partition}:dynamodb:${Region}:${Account}:table/users-table"
-    );
-}
-
-#[tokio::test]
-async fn test_arn_substitution_sqs_queue() {
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(&sample_dir(), None, &loader)
-        .await
-        .expect("resolve");
-
-    let patterns = vec!["arn:${Partition}:sqs:${Region}:${Account}:${QueueName}".to_string()];
-    let substituted = resolver
-        .substitute_arn_patterns_for_test("sqs", "queue", &patterns)
-        .expect("should substitute");
-
-    assert_eq!(substituted.len(), 1);
-    assert_eq!(
-        substituted[0],
-        "arn:${Partition}:sqs:${Region}:${Account}:task-processing-queue"
-    );
-}
-
-// ===================================================================
-// 3. Expression Handling Tests
-// ===================================================================
-
-#[tokio::test]
-async fn test_expression_attributes_produce_wildcard_binding() {
-    let hcl = r#"
-resource "aws_s3_bucket" "dynamic" {
-  bucket = var.bucket_name
-}
-"#;
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    std::fs::write(tmp.path().join("main.tf"), hcl).expect("write");
-
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(tmp.path(), None, &loader)
-        .await
-        .expect("resolve");
-
-    let patterns = vec!["arn:${Partition}:s3:::${BucketName}".to_string()];
-    let substituted = resolver.substitute_arn_patterns_for_test("s3", "bucket", &patterns);
-    assert!(
-        substituted.is_none(),
-        "Single wildcard binding should return None (no improvement over default)"
-    );
-}
-
-#[tokio::test]
-async fn test_mixed_literal_and_expression_bindings() {
-    let hcl = r#"
-resource "aws_s3_bucket" "concrete" {
-  bucket = "known-bucket"
-}
-
-resource "aws_s3_bucket" "dynamic" {
-  bucket = var.bucket_name
-}
-"#;
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    std::fs::write(tmp.path().join("main.tf"), hcl).expect("write");
-
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(tmp.path(), None, &loader)
-        .await
-        .expect("resolve");
-
-    let patterns = vec!["arn:${Partition}:s3:::${BucketName}".to_string()];
-    let substituted = resolver
-        .substitute_arn_patterns_for_test("s3", "bucket", &patterns)
-        .expect("should substitute (has at least one concrete)");
-
-    assert_eq!(substituted.len(), 2);
-    assert!(substituted.contains(&"arn:${Partition}:s3:::known-bucket".to_string()));
-    assert!(substituted.contains(&"arn:${Partition}:s3:::*".to_string()));
-}
-
-// ===================================================================
-// 4. Serialization Round-Trip Test
-// ===================================================================
-
-#[test]
-fn test_parse_result_json_roundtrip() {
-    let result = parse_terraform_directory(&sample_dir()).expect("parse");
-
-    let json = serde_json::to_string_pretty(&result).expect("serialize");
-    let deserialized: TerraformParseResult = serde_json::from_str(&json).expect("deserialize");
-
-    assert_eq!(result, deserialized);
-}
-
-// ===================================================================
-// 5. Edge Cases
-// ===================================================================
-
-#[test]
-fn test_empty_directory_produces_empty_result() {
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    let result = parse_terraform_directory(tmp.path()).expect("parse");
-
-    assert!(result.resources.is_empty());
-}
-
-#[tokio::test]
-async fn test_empty_directory_resolver_is_empty() {
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    std::fs::write(tmp.path().join("empty.tf"), "").expect("write");
-
-    let loader = ServiceReferenceLoader::empty_loader_for_tests().unwrap();
-    let resolver = TerraformResourceResolver::from_directory(tmp.path(), None, &loader)
-        .await
-        .expect("resolve");
-
-    assert!(resolver.is_empty());
-}
-
-#[test]
-fn test_directory_with_only_source_code_no_tf() {
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    std::fs::write(tmp.path().join("app.py"), "import boto3").expect("write");
-
-    let result = parse_terraform_directory(tmp.path()).expect("parse");
-    assert!(result.resources.is_empty());
-}
-
-#[tokio::test]
-async fn test_non_aws_resources_not_in_resolver() {
-    let hcl = r#"
-resource "google_storage_bucket" "gcs" {
-  name = "my-gcs-bucket"
-}
-
-resource "aws_s3_bucket" "s3" {
-  bucket = "my-s3-bucket"
-}
-"#;
-    let tmp = tempfile::TempDir::new().expect("tmp");
-    std::fs::write(tmp.path().join("main.tf"), hcl).expect("write");
-
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(tmp.path(), None, &loader)
-        .await
-        .expect("resolve");
-
-    assert_eq!(resolver.len(), 1);
-    let s3 = &resolver.resources()[&("s3".to_string(), "bucket".to_string())];
-    assert_eq!(s3[0].binding_name.as_deref(), Some("my-s3-bucket"));
-}
-
-// ===================================================================
-// 6. Terraform State File Integration Tests
-// ===================================================================
-
-#[test]
-fn test_parse_sample_state_file() {
-    let state_path = sample_dir().join("terraform.tfstate");
-    let map = parse_terraform_state(&state_path).expect("should parse state file");
-
-    assert!(
-        map.len() >= 5,
-        "Expected at least 5 state resource groups, got {}",
-        map.len()
-    );
-
-    for resources in map.values() {
-        for resource in resources {
+        // Always validate structural fields
+        for expl in &explanations {
             assert!(
-                resource.arn.is_some(),
-                "Resource {}.{} should have an ARN",
-                resource.resource_type,
-                resource.name
+                !expl.arn.is_empty(),
+                "[{fixture_name}] explanation ARN should not be empty"
+            );
+            assert!(
+                expl.terraform_resource_type.starts_with(
+                    iam_policy_autopilot_policy_generation::extraction::terraform::AWS_RESOURCE_PREFIX
+                ),
+                "[{fixture_name}] resource type should start with aws_: {}",
+                expl.terraform_resource_type
+            );
+            assert!(
+                !expl.location.is_empty(),
+                "[{fixture_name}] location should not be empty"
             );
         }
     }
 }
 
-#[test]
-fn test_state_arns_are_exact() {
-    let state_path = sample_dir().join("terraform.tfstate");
-    let map = parse_terraform_state(&state_path).expect("parse");
-
-    let s3_data = &map[&("aws_s3_bucket".into(), "data_bucket".into())][0];
-    assert_eq!(
-        s3_data.arn.as_deref(),
-        Some("arn:aws:s3:::my-app-data-bucket")
-    );
-
-    let ddb = &map[&("aws_dynamodb_table".into(), "users_table".into())][0];
-    assert_eq!(
-        ddb.arn.as_deref(),
-        Some("arn:aws:dynamodb:us-east-1:123456789012:table/users-table")
-    );
-}
-
-#[test]
-fn test_state_data_sources_skipped() {
-    let state_path = sample_dir().join("terraform.tfstate");
-    let map = parse_terraform_state(&state_path).expect("parse");
-
-    assert!(
-        !map.contains_key(&("aws_caller_identity".into(), "current".into())),
-        "Data sources should be skipped in state parsing"
-    );
-}
+// ===================================================================
+// State-specific invariant: no ${Partition} in state-derived ARNs
+// ===================================================================
 
 #[tokio::test]
-async fn test_state_bindings_take_precedence_over_hcl() {
-    let state_path = sample_dir().join("terraform.tfstate");
+async fn test_state_arns_have_no_placeholders() {
+    let fixture_name = "state_precedence";
+    let expected = load_expected(fixture_name);
+    let sl = mock_loader().await;
+    let resolver = build_resolver(fixture_name, &expected, &sl).await;
 
-    let (_server, loader) = mock_loader().await;
-    let resolver =
-        TerraformResourceResolver::from_directory(&sample_dir(), Some(&state_path), &loader)
-            .await
-            .expect("resolve");
+    for sub in &expected.expected_arn_substitutions {
+        if let Some(actual) = resolver.substitute_arn_patterns_for_test(
+            &sub.service,
+            &sub.resource_type,
+            &sub.input_patterns,
+        ) {
+            for arn in &actual {
+                assert!(
+                    !arn.contains("${Partition}")
+                        && !arn.contains("${Region}")
+                        && !arn.contains("${Account}"),
+                    "[{fixture_name}] state ARN should not contain placeholders: {arn}"
+                );
+            }
+        }
+    }
+}
 
-    let patterns = vec!["arn:${Partition}:s3:::${BucketName}".to_string()];
-    let substituted = resolver
-        .substitute_arn_patterns_for_test("s3", "bucket", &patterns)
-        .expect("should substitute");
+// ===================================================================
+// State file parsing tests
+// ===================================================================
 
-    for arn in &substituted {
-        assert!(
-            !arn.contains("${Partition}"),
-            "State-derived ARN should not contain placeholders: {arn}"
+#[test]
+fn test_state_file_parsing() {
+    use iam_policy_autopilot_policy_generation::extraction::terraform::state_parser::parse_terraform_state;
+
+    let fixture_name = "state_precedence";
+    let expected = load_expected(fixture_name);
+    let state_path = fixture_dir(fixture_name).join("terraform.tfstate");
+    let map = parse_terraform_state(&state_path).expect("should parse state file");
+
+    let state_expected = expected.expected_state_parse.as_ref().unwrap_or_else(|| {
+        panic!("[{fixture_name}] expected_state_parse is required for state fixtures")
+    });
+
+    assert_eq!(
+        map.len(),
+        state_expected.managed_resource_count,
+        "[{fixture_name}] state managed resource count mismatch"
+    );
+
+    // Verify excluded keys (data sources)
+    for excluded_key in &state_expected.excluded_keys {
+        let parts: Vec<&str> = excluded_key.splitn(2, '.').collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "excluded_keys entry must be 'type.name': {excluded_key}"
         );
         assert!(
-            arn.starts_with("arn:aws:s3:::"),
-            "State ARN should be a full S3 ARN: {arn}"
+            !map.contains_key(&(parts[0].to_string(), parts[1].to_string())),
+            "[{fixture_name}] {excluded_key} should have been excluded (data source)"
         );
     }
 
-    assert_eq!(substituted.len(), 2);
-    assert!(substituted.contains(&"arn:aws:s3:::my-app-data-bucket".to_string()));
-    assert!(substituted.contains(&"arn:aws:s3:::my-app-logs-bucket".to_string()));
-}
-
-#[tokio::test]
-async fn test_state_dynamodb_binding_is_full_arn() {
-    let state_path = sample_dir().join("terraform.tfstate");
-
-    let (_server, loader) = mock_loader().await;
-    let resolver =
-        TerraformResourceResolver::from_directory(&sample_dir(), Some(&state_path), &loader)
-            .await
-            .expect("resolve");
-
-    let patterns =
-        vec!["arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}".to_string()];
-    let substituted = resolver
-        .substitute_arn_patterns_for_test("dynamodb", "table", &patterns)
-        .expect("should substitute");
-
-    assert_eq!(substituted.len(), 1);
-    assert_eq!(
-        substituted[0],
-        "arn:aws:dynamodb:us-east-1:123456789012:table/users-table"
-    );
-}
-
-// ===================================================================
-// 7. Variable Resolution Integration Tests
-// ===================================================================
-
-#[tokio::test]
-async fn test_vars_sample_resolves_interpolations() {
-    // terraform_vars_sample has:
-    //   bucket = "${var.app_name}-${var.environment}-data"  (app_name=myapp default, environment overridden to "prod")
-    //   name = var.table_name  (from tfvars: "users-prod")
-    //   name = "${var.app_name}-tasks"  (app_name=myapp default)
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(&vars_sample_dir(), None, &loader)
-        .await
-        .expect("resolve");
-
-    // S3 bucket: "${var.app_name}-${var.environment}-data" → "myapp-prod-data"
-    let s3_buckets = &resolver.resources()[&("s3".to_string(), "bucket".to_string())];
-    assert_eq!(s3_buckets.len(), 1);
-    assert_eq!(
-        s3_buckets[0].binding_name.as_deref(),
-        Some("myapp-prod-data"),
-        "Interpolation should resolve with tfvars override"
-    );
-
-    // DynamoDB table: var.table_name → "users-prod" (from terraform.tfvars)
-    let ddb_tables = &resolver.resources()[&("dynamodb".to_string(), "table".to_string())];
-    assert_eq!(ddb_tables.len(), 1);
-    assert_eq!(
-        ddb_tables[0].binding_name.as_deref(),
-        Some("users-prod"),
-        "Bare var reference should resolve from tfvars"
-    );
-
-    // SQS queue: "${var.app_name}-tasks" → "myapp-tasks"
-    let sqs_queues = &resolver.resources()[&("sqs".to_string(), "queue".to_string())];
-    assert_eq!(sqs_queues.len(), 1);
-    assert_eq!(
-        sqs_queues[0].binding_name.as_deref(),
-        Some("myapp-tasks"),
-        "Interpolation should resolve with default value"
-    );
-}
-
-// ===================================================================
-// 8. Binding Explanations Integration Test
-// ===================================================================
-
-#[tokio::test]
-async fn test_binding_explanations_from_hcl() {
-    let (_server, loader) = mock_loader().await;
-    let resolver = TerraformResourceResolver::from_directory(&sample_dir(), None, &loader)
-        .await
-        .expect("resolve");
-
-    let explanations = resolver.build_binding_explanations();
-    assert!(
-        !explanations.is_empty(),
-        "Should produce binding explanations for resolved resources"
-    );
-
-    // Each explanation should have a non-empty ARN and a valid terraform resource type
-    for explanation in &explanations {
-        assert!(!explanation.arn.is_empty(), "ARN should not be empty");
-        assert!(
-            explanation.terraform_resource_type.starts_with("aws_"),
-            "Resource type should start with aws_: {}",
-            explanation.terraform_resource_type
+    // Verify specific ARNs
+    for (key, expected_arn) in &state_expected.specific_arns {
+        let parts: Vec<&str> = key.splitn(2, '.').collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "specific_arns key must be 'type.name': {key}"
         );
-        assert!(
-            !explanation.location.is_empty(),
-            "Location should not be empty"
+        let resources = map
+            .get(&(parts[0].to_string(), parts[1].to_string()))
+            .unwrap_or_else(|| panic!("[{fixture_name}] state missing resource {key}"));
+        assert_eq!(
+            resources[0].arn.as_deref(),
+            Some(expected_arn.as_str()),
+            "[{fixture_name}] state ARN mismatch for {key}"
         );
     }
 }
 
+// ===================================================================
+// Empty directory test
+// ===================================================================
+
 #[tokio::test]
-async fn test_binding_explanations_with_state_use_state_source() {
-    let state_path = sample_dir().join("terraform.tfstate");
-    let (_server, loader) = mock_loader().await;
-    let resolver =
-        TerraformResourceResolver::from_directory(&sample_dir(), Some(&state_path), &loader)
-            .await
-            .expect("resolve");
+async fn test_empty_directory_resolver_is_empty() {
+    let dir = fixture_dir("empty_directory");
+    let loader = ServiceReferenceLoader::empty_loader_for_tests().unwrap();
+    let resolver = TerraformResourceResolver::from_directory(&dir, None, &loader)
+        .await
+        .expect("resolve empty dir");
 
-    let explanations = resolver.build_binding_explanations();
     assert!(
-        !explanations.is_empty(),
-        "Should produce binding explanations"
+        resolver.is_empty(),
+        "Empty fixture directory should produce empty resolver"
     );
-
-    // With state file, at least some explanations should have full AWS ARNs
-    let state_explanations: Vec<_> = explanations
-        .iter()
-        .filter(|e| e.arn.starts_with("arn:aws:"))
-        .collect();
-    assert!(
-        !state_explanations.is_empty(),
-        "Should have state-derived ARN explanations"
-    );
+    assert_eq!(resolver.len(), 0);
 }
 
 // ===================================================================
-// 9. Error Handling Tests
+// Error handling tests
 // ===================================================================
 
 #[tokio::test]
@@ -670,4 +514,22 @@ async fn test_missing_state_file_produces_error() {
         result.is_err(),
         "Missing state file should produce an error"
     );
+}
+
+// ===================================================================
+// JSON round-trip test
+// ===================================================================
+
+#[test]
+fn test_parse_result_json_roundtrip() {
+    use iam_policy_autopilot_policy_generation::extraction::terraform::hcl_parser::parse_terraform_directory;
+    use iam_policy_autopilot_policy_generation::extraction::terraform::TerraformParseResult;
+
+    let dir = fixture_dir("basic_multi_resource");
+    let result = parse_terraform_directory(&dir).expect("parse");
+
+    let json = serde_json::to_string_pretty(&result).expect("serialize");
+    let deserialized: TerraformParseResult = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(result, deserialized);
 }

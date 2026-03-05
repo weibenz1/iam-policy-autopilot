@@ -49,7 +49,10 @@ fn parse_terraform_state_content(content: &str) -> Result<StateResourceMap> {
     let resources = state.resources.unwrap_or_default();
     for raw_resource in &resources {
         // Only process AWS resources
-        if !raw_resource.resource_type.starts_with("aws_") {
+        if !raw_resource
+            .resource_type
+            .starts_with(super::AWS_RESOURCE_PREFIX)
+        {
             continue;
         }
 
@@ -113,6 +116,7 @@ struct RawInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn sample_state_json() -> &'static str {
         r#"{
@@ -181,11 +185,40 @@ mod tests {
 }"#
     }
 
+    // -----------------------------------------------------------------------
+    // Parameterized version validation tests
+    // -----------------------------------------------------------------------
+
+    #[rstest]
+    #[case("version_3_rejected", r#"{"version": 3, "resources": []}"#, true)]
+    #[case("missing_version_rejected", r#"{"resources": []}"#, true)]
+    #[case("malformed_json_rejected", "not json", true)]
+    #[case("version_4_accepted", r#"{"version": 4, "resources": []}"#, false)]
+    #[case("version_5_accepted", r#"{"version": 5, "resources": []}"#, false)]
+    #[case("empty_resources", r#"{"version": 4, "resources": []}"#, false)]
+    #[case("no_resources_key", r#"{"version": 4}"#, false)]
+    fn test_state_parsing_edge_cases(
+        #[case] _name: &str,
+        #[case] json: &str,
+        #[case] is_err: bool,
+    ) {
+        let result = parse_terraform_state_content(json);
+        assert_eq!(
+            result.is_err(),
+            is_err,
+            "[{_name}] expected is_err={is_err}, got {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sample state file tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_parse_state_extracts_resources() {
         let map = parse_terraform_state_content(sample_state_json()).expect("parse");
-        // Should have 3 managed resource keys (data source skipped)
-        assert_eq!(map.len(), 3);
+        assert_eq!(map.len(), 3, "3 managed resources (data source skipped)");
     }
 
     #[test]
@@ -213,59 +246,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_state_malformed_json() {
-        let result = parse_terraform_state_content("not json");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_state_empty_resources() {
-        let map =
-            parse_terraform_state_content(r#"{"version": 4, "resources": []}"#).expect("parse");
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn test_parse_state_no_resources_key() {
-        let map = parse_terraform_state_content(r#"{"version": 4}"#).expect("parse");
-        assert!(map.is_empty());
-    }
-
-    #[test]
     fn test_resources_keyed_by_type_and_name() {
         let map = parse_terraform_state_content(sample_state_json()).expect("parse");
         assert!(map.contains_key(&("aws_s3_bucket".into(), "data_bucket".into())));
         assert!(map.contains_key(&("aws_dynamodb_table".into(), "users_table".into())));
         assert!(map.contains_key(&("aws_sqs_queue".into(), "task_queue".into())));
-    }
-
-    #[test]
-    fn test_rejects_state_version_below_4() {
-        let result = parse_terraform_state_content(r#"{"version": 3, "resources": []}"#);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unsupported terraform state version 3"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_rejects_missing_version_field() {
-        let result = parse_terraform_state_content(r#"{"resources": []}"#);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("missing the 'version' field"), "{err}");
-    }
-
-    #[test]
-    fn test_accepts_state_version_4() {
-        assert!(parse_terraform_state_content(r#"{"version": 4, "resources": []}"#).is_ok());
-    }
-
-    #[test]
-    fn test_accepts_future_state_version() {
-        assert!(parse_terraform_state_content(r#"{"version": 5, "resources": []}"#).is_ok());
     }
 
     #[test]

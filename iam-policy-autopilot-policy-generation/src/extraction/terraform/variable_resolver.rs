@@ -236,8 +236,63 @@ fn expr_to_string(expr: &hcl::Expression) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::io::Write;
     use tempfile::TempDir;
+
+    // -----------------------------------------------------------------------
+    // Helper: build a VariableContext from (name, value) pairs
+    // -----------------------------------------------------------------------
+
+    fn ctx_from(vars: &[(&str, &str)]) -> VariableContext {
+        let mut ctx = VariableContext::default();
+        for (k, v) in vars {
+            ctx.vars.insert((*k).to_string(), (*v).to_string());
+        }
+        ctx
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameterized try_resolve tests
+    // -----------------------------------------------------------------------
+
+    #[rstest]
+    // Bare variable reference → Literal
+    #[case("bare_var",        &[("bucket_name", "my-bucket")],     "var.bucket_name",                        Some(AttributeValue::Literal("my-bucket".into())))]
+    // Single interpolation → Literal
+    #[case("interpolation",   &[("prefix", "myapp")],              "${var.prefix}-data-bucket",               Some(AttributeValue::Literal("myapp-data-bucket".into())))]
+    // Multiple interpolations → Literal
+    #[case("multi_interp",    &[("env", "prod"), ("app", "myapp")], "${var.app}-${var.env}-bucket",           Some(AttributeValue::Literal("myapp-prod-bucket".into())))]
+    // Mixed literal text + interpolations → Literal
+    #[case("mixed_literal",   &[("env1", "staging"), ("env2", "us-east")], "NAME_In__${var.env1}__${var.env2}", Some(AttributeValue::Literal("NAME_In__staging__us-east".into())))]
+    // Partial resolution (one var missing) → Expression
+    #[case("partial_interp",  &[("env1", "staging")],              "NAME_In__${var.env1}__${var.env2}",      Some(AttributeValue::Expression("NAME_In__staging__${var.env2}".into())))]
+    // Partial resolution (suffix missing) → Expression
+    #[case("partial_suffix",  &[("prefix", "myapp")],              "${var.prefix}-${var.suffix}-bucket",     Some(AttributeValue::Expression("myapp-${var.suffix}-bucket".into())))]
+    // Unknown bare var → None
+    #[case("unknown_bare",    &[],                                  "var.unknown",                            None)]
+    fn test_try_resolve(
+        #[case] _name: &str,
+        #[case] vars: &[(&str, &str)],
+        #[case] input: &str,
+        #[case] expected: Option<AttributeValue>,
+    ) {
+        let ctx = ctx_from(vars);
+        let expr = AttributeValue::Expression(input.to_string());
+        let result = ctx.try_resolve(&expr);
+        assert_eq!(result, expected, "try_resolve mismatch for case '{_name}'");
+    }
+
+    #[test]
+    fn test_literal_not_modified() {
+        let ctx = VariableContext::default();
+        let lit = AttributeValue::Literal("already-resolved".to_string());
+        assert!(ctx.try_resolve(&lit).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Variable extraction + override tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_extract_variable_defaults() {
@@ -265,8 +320,6 @@ variable "no_default" {
     #[test]
     fn test_tfvars_override_defaults() {
         let mut ctx = VariableContext::default();
-
-        // Set defaults
         ctx.extract_variable_defaults(
             r#"
 variable "bucket_name" {
@@ -277,108 +330,41 @@ variable "bucket_name" {
         );
         assert_eq!(ctx.get("bucket_name"), Some("default-bucket"));
 
-        // Override with tfvars
         ctx.apply_tfvars(r#"bucket_name = "override-bucket""#);
         assert_eq!(ctx.get("bucket_name"), Some("override-bucket"));
     }
 
     #[test]
-    fn test_resolve_bare_var_reference() {
+    fn test_complex_default_values_skipped() {
         let mut ctx = VariableContext::default();
-        ctx.vars
-            .insert("bucket_name".to_string(), "my-bucket".to_string());
+        let hcl = r#"
+variable "tags" {
+  default = {
+    env = "prod"
+    team = "platform"
+  }
+}
 
-        let expr = AttributeValue::Expression("var.bucket_name".to_string());
-        let resolved = ctx.try_resolve(&expr).unwrap();
-        assert_eq!(resolved, AttributeValue::Literal("my-bucket".to_string()));
-    }
+variable "allowed_cidrs" {
+  default = ["10.0.0.0/8", "172.16.0.0/12"]
+}
 
-    #[test]
-    fn test_resolve_interpolation() {
-        let mut ctx = VariableContext::default();
-        ctx.vars.insert("prefix".to_string(), "myapp".to_string());
-
-        let expr = AttributeValue::Expression("${var.prefix}-data-bucket".to_string());
-        let resolved = ctx.try_resolve(&expr).unwrap();
-        assert_eq!(
-            resolved,
-            AttributeValue::Literal("myapp-data-bucket".to_string())
+variable "simple" {
+  default = "kept"
+}
+"#;
+        ctx.extract_variable_defaults(hcl, Path::new("variables.tf"));
+        assert!(ctx.get("tags").is_none(), "Map defaults should be skipped");
+        assert!(
+            ctx.get("allowed_cidrs").is_none(),
+            "List defaults should be skipped"
         );
+        assert_eq!(ctx.get("simple"), Some("kept"));
     }
 
-    #[test]
-    fn test_resolve_multiple_interpolations() {
-        let mut ctx = VariableContext::default();
-        ctx.vars.insert("env".to_string(), "prod".to_string());
-        ctx.vars.insert("app".to_string(), "myapp".to_string());
-
-        let expr = AttributeValue::Expression("${var.app}-${var.env}-bucket".to_string());
-        let resolved = ctx.try_resolve(&expr).unwrap();
-        assert_eq!(
-            resolved,
-            AttributeValue::Literal("myapp-prod-bucket".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_mixed_literal_and_interpolation() {
-        let mut ctx = VariableContext::default();
-        ctx.vars.insert("env1".to_string(), "staging".to_string());
-        ctx.vars.insert("env2".to_string(), "us-east".to_string());
-
-        let expr = AttributeValue::Expression("NAME_In__${var.env1}__${var.env2}".to_string());
-        let resolved = ctx.try_resolve(&expr).unwrap();
-        assert_eq!(
-            resolved,
-            AttributeValue::Literal("NAME_In__staging__us-east".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_mixed_partial_only_some_vars_defined() {
-        let mut ctx = VariableContext::default();
-        ctx.vars.insert("env1".to_string(), "staging".to_string());
-        // env2 NOT defined
-
-        let expr = AttributeValue::Expression("NAME_In__${var.env1}__${var.env2}".to_string());
-        let resolved = ctx.try_resolve(&expr).unwrap();
-        // env1 resolved, env2 not — stays as Expression
-        assert_eq!(
-            resolved,
-            AttributeValue::Expression("NAME_In__staging__${var.env2}".to_string())
-        );
-    }
-
-    #[test]
-    fn test_unresolvable_var_stays_expression() {
-        let ctx = VariableContext::default(); // No vars defined
-
-        let expr = AttributeValue::Expression("var.unknown".to_string());
-        let resolved = ctx.try_resolve(&expr);
-        assert!(resolved.is_none());
-    }
-
-    #[test]
-    fn test_partial_interpolation_stays_expression() {
-        let mut ctx = VariableContext::default();
-        ctx.vars.insert("prefix".to_string(), "myapp".to_string());
-        // var.suffix is NOT defined
-
-        let expr = AttributeValue::Expression("${var.prefix}-${var.suffix}-bucket".to_string());
-        let resolved = ctx.try_resolve(&expr).unwrap();
-        // prefix resolved, suffix not — still an expression
-        assert_eq!(
-            resolved,
-            AttributeValue::Expression("myapp-${var.suffix}-bucket".to_string())
-        );
-    }
-
-    #[test]
-    fn test_literal_not_modified() {
-        let ctx = VariableContext::default();
-        let lit = AttributeValue::Literal("already-resolved".to_string());
-        assert!(ctx.try_resolve(&lit).is_none());
-    }
+    // -----------------------------------------------------------------------
+    // resolve_attributes integration test
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_resolve_attributes_in_parse_result() {
@@ -411,11 +397,14 @@ variable "bucket_name" {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Directory-based tests (require temp dirs)
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_from_directory_with_tfvars() {
         let tmp = TempDir::new().expect("tmp");
 
-        // variables.tf with defaults
         let mut vars_tf = std::fs::File::create(tmp.path().join("variables.tf")).expect("create");
         writeln!(
             vars_tf,
@@ -430,15 +419,14 @@ variable "table_name" {{
         )
         .expect("write");
 
-        // terraform.tfvars overrides bucket_name
         let mut tfvars =
             std::fs::File::create(tmp.path().join("terraform.tfvars")).expect("create");
         writeln!(tfvars, r#"bucket_name = "prod-bucket""#).expect("write");
 
         let ctx = VariableContext::from_directory(tmp.path()).expect("resolve");
 
-        assert_eq!(ctx.get("bucket_name"), Some("prod-bucket")); // overridden
-        assert_eq!(ctx.get("table_name"), Some("default-table")); // default kept
+        assert_eq!(ctx.get("bucket_name"), Some("prod-bucket"));
+        assert_eq!(ctx.get("table_name"), Some("default-table"));
     }
 
     #[test]
@@ -478,7 +466,6 @@ variable "env" {{
         )
         .expect("write");
 
-        // Two auto.tfvars — "b" should override "a" due to lexicographic order
         let mut a = std::fs::File::create(tmp.path().join("a.auto.tfvars")).expect("create");
         writeln!(a, r#"env = "from-a""#).expect("write");
 
@@ -491,36 +478,5 @@ variable "env" {{
             Some("from-b"),
             "Later auto.tfvars should win"
         );
-    }
-
-    #[test]
-    fn test_complex_default_values_skipped() {
-        let mut ctx = VariableContext::default();
-        let hcl = r#"
-variable "tags" {
-  default = {
-    env = "prod"
-    team = "platform"
-  }
-}
-
-variable "allowed_cidrs" {
-  default = ["10.0.0.0/8", "172.16.0.0/12"]
-}
-
-variable "simple" {
-  default = "kept"
-}
-"#;
-        ctx.extract_variable_defaults(hcl, Path::new("variables.tf"));
-
-        // Complex defaults (map, list) should be silently skipped
-        assert!(ctx.get("tags").is_none(), "Map defaults should be skipped");
-        assert!(
-            ctx.get("allowed_cidrs").is_none(),
-            "List defaults should be skipped"
-        );
-        // Scalar string defaults should still be captured
-        assert_eq!(ctx.get("simple"), Some("kept"));
     }
 }
