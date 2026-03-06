@@ -187,10 +187,7 @@ fn test_mcp_server_rejects_unknown_args() {
         .args(["mcp-server", "--unknown-flag"])
         .output()
         .expect("failed to run mcp-server with unknown flag");
-    assert!(
-        !output.status.success(),
-        "should fail with unknown flag"
-    );
+    assert!(!output.status.success(), "should fail with unknown flag");
 }
 
 #[test]

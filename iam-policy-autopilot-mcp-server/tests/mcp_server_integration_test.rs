@@ -304,8 +304,7 @@ async fn test_http_generate_policy_for_access_denied() {
 #[tokio::test]
 #[serial]
 async fn test_http_custom_bind_address_list_tools() {
-    let (client, mut server_process) =
-        setup_http_with_bind_address(8004, "127.0.0.1").await;
+    let (client, mut server_process) = setup_http_with_bind_address(8004, "127.0.0.1").await;
 
     let tools_result = client.list_tools(None).await.unwrap();
 
