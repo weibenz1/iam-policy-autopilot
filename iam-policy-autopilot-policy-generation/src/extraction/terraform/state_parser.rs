@@ -3,9 +3,11 @@
 //! Reads the v4 JSON format and extracts deployed AWS resource ARNs.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
+use ast_grep_core::tree_sitter::LanguageExt;
+use ast_grep_language::Json;
 use serde::Deserialize;
 
 use crate::Location;
@@ -96,50 +98,62 @@ fn parse_terraform_state_content(content: &str, source_path: &Path) -> Result<St
     Ok(resources_map)
 }
 
-/// Find the location (line, column) of a string value in JSON content.
+/// Find the location of an ARN value in JSON content using ast-grep tree-sitter parsing.
 ///
-/// Searches for the pattern `"arn": "<value>"` in the raw content and returns
-/// a `Location` pointing at the value (including surrounding quotes).
-/// Falls back to searching for the bare value string if the key pattern isn't found.
+/// Parses the content with ast-grep's JSON language support and walks the tree-sitter
+/// AST to find `pair` nodes where the key is `"arn"`. Matches by comparing the value
+/// text (stripped of quotes) against the provided `value`.
+///
+/// Returns a `Location` pointing at the ARN value node (the string literal including quotes).
 fn find_string_location(content: &str, source_path: &Path, value: &str) -> Option<Location> {
-    // Search for "arn": "value" pattern first (more precise)
-    let arn_pattern = format!(r#""arn": "{value}""#);
-    let search_str = content.find(&arn_pattern).or_else(|| {
-        // Try without space after colon
-        let alt_pattern = format!(r#""arn":"{value}""#);
-        content.find(&alt_pattern)
-    });
+    let ast_grep = Json.ast_grep(content);
+    let root = ast_grep.root();
 
-    if let Some(byte_offset) = search_str {
-        // Find the start of the value (the quote before the ARN)
-        let value_offset = content[byte_offset..]
-            .find(value)
-            .map(|off| byte_offset + off)?;
-        return Some(byte_offset_to_location(content, source_path, value_offset, value.len()));
-    }
-
-    // Fallback: search for the bare quoted value
-    let quoted = format!(r#""{value}""#);
-    let byte_offset = content.find(&quoted)?;
-    Some(byte_offset_to_location(content, source_path, byte_offset, quoted.len()))
+    // Walk all nodes via DFS to find "pair" nodes with key "arn"
+    find_arn_value_in_tree(&root, source_path, value)
 }
 
-/// Convert a byte offset in content to a `Location` with line/column numbers.
-fn byte_offset_to_location(
-    content: &str,
+/// Recursively walk the AST tree to find a JSON pair node with key `"arn"` whose
+/// value matches the given string. Returns the `Location` of the value node.
+fn find_arn_value_in_tree<D: ast_grep_core::Doc>(
+    node: &ast_grep_core::Node<D>,
     source_path: &Path,
-    offset: usize,
-    length: usize,
-) -> Location {
-    let before = &content[..offset];
-    let line = before.matches('\n').count() + 1;
-    let col = offset - before.rfind('\n').map_or(0, |pos| pos + 1) + 1;
-    let end_col = col + length;
-    Location::new(
-        source_path.to_path_buf(),
-        (line, col),
-        (line, end_col),
-    )
+    value: &str,
+) -> Option<Location> {
+    if node.kind() == "pair" {
+        // A JSON pair node has children: key (string), ":", value
+        // Check if the key is "arn"
+        let mut children = node.children();
+        if let Some(key_node) = children.next() {
+            let key_text = key_node.text();
+            if key_text.trim_matches('"') == "arn" {
+                // Find the value child (skip the ":" separator)
+                for child in children {
+                    if child.kind() != ":" {
+                        let child_text = child.text();
+                        let unquoted = child_text.trim_matches('"');
+                        if unquoted == value {
+                            let start = child.start_pos();
+                            let end = child.end_pos();
+                            return Some(Location::new(
+                                source_path.to_path_buf(),
+                                (start.line() + 1, start.column(&child) + 1),
+                                (end.line() + 1, end.column(&child) + 1),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Recurse into children
+    for child in node.children() {
+        if let Some(loc) = find_arn_value_in_tree(&child, source_path, value) {
+            return Some(loc);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +186,7 @@ struct RawInstance {
 mod tests {
     use super::*;
     use rstest::rstest;
+    use std::path::PathBuf;
 
     fn sample_state_json() -> &'static str {
         r#"{
@@ -393,13 +408,14 @@ mod tests {
 
         // S3 bucket ARN: "arn:aws:s3:::my-app-data-bucket" on line 13 of sample JSON
         // Line 13: `            "arn": "arn:aws:s3:::my-app-data-bucket",`
-        // Value starts at col 21 (after 12 spaces + `"arn": "`), length 31
+        // ast-grep returns the string node including quotes
+        // Value node `"arn:aws:s3:::my-app-data-bucket"` starts at col 20 (1-based, at the `"`)
         let s3 = &map[&("aws_s3_bucket".into(), "data_bucket".into())][0];
         let loc = s3.arn_location.as_ref().expect("S3 ARN should have location");
         assert_eq!(loc.file_path, PathBuf::from("terraform.tfstate"));
         assert_eq!(loc.start_line(), 13);
-        assert_eq!(loc.start_col(), 21);
-        assert_eq!(loc.end_col(), 52); // 21 + 31
+        assert_eq!(loc.start_col(), 20);
+        assert_eq!(loc.end_col(), 53);
 
         // DynamoDB ARN on line 28
         let ddb = &map[&("aws_dynamodb_table".into(), "users_table".into())][0];
@@ -410,10 +426,8 @@ mod tests {
     #[test]
     fn test_arn_location_line_and_col_accuracy() {
         // Minimal JSON where we can count positions exactly
-        //                                                  col positions:
         // line 11: `            "arn": "arn:aws:s3:::test-bucket"`
         //          123456789012345678901234567890
-        //                                ^col21  = start of value
         let json = r#"{
   "version": 4,
   "resources": [
@@ -437,29 +451,8 @@ mod tests {
 
         assert_eq!(loc.file_path, PathBuf::from("state.tfstate"));
         assert_eq!(loc.start_line(), 11);
-        assert_eq!(loc.start_col(), 21); // after `            "arn": "`
-        // "arn:aws:s3:::test-bucket" = 24 chars
-        assert_eq!(loc.end_col(), 45); // 21 + 24
-    }
-
-    #[test]
-    fn test_byte_offset_to_location_basic() {
-        let content = "line1\nline2\nline3";
-        // "line3" starts at byte offset 12
-        let loc = byte_offset_to_location(content, Path::new("f.json"), 12, 5);
-        assert_eq!(loc.start_line(), 3);
-        assert_eq!(loc.start_col(), 1);
-        assert_eq!(loc.end_col(), 6); // 1 + 5
-    }
-
-    #[test]
-    fn test_byte_offset_to_location_mid_line() {
-        let content = "{\n  \"key\": \"value\"\n}";
-        // "value" starts at byte offset 11
-        let loc = byte_offset_to_location(content, Path::new("f.json"), 11, 5);
-        assert_eq!(loc.start_line(), 2);
-        assert_eq!(loc.start_col(), 10); // after `  "key": "`
-        assert_eq!(loc.end_col(), 15);
+        assert_eq!(loc.start_col(), 20); 
+        assert_eq!(loc.end_col(), 46);
     }
 
     #[test]
@@ -468,8 +461,8 @@ mod tests {
         let loc = find_string_location(content, Path::new("s.json"), "arn:aws:s3:::my-bucket")
             .expect("should find");
         assert_eq!(loc.start_line(), 1);
-        // "arn:aws:s3:::my-bucket" starts at byte offset 9, col = 10 (1-based)
-        assert_eq!(loc.start_col(), 10);
+        // `{"arn": "arn:aws:s3:::my-bucket"}` — value starts at col 9 (1-based, at `"`)
+        assert_eq!(loc.start_col(), 9);
     }
 
     #[test]

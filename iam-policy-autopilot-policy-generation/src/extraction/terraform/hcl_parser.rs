@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ast_grep_core::tree_sitter::LanguageExt;
+use ast_grep_language::Hcl;
 use walkdir::WalkDir;
 
 use crate::Location;
@@ -213,110 +215,55 @@ fn expression_to_attribute_value(expr: &hcl::Expression) -> AttributeValue {
     }
 }
 
-/// Locate a Terraform block in the source content and return a [`Location`]
-/// with accurate line and column information.
+/// Locate a Terraform resource block in the source content and return a [`Location`]
+/// with accurate line and column information using ast-grep tree-sitter parsing.
 ///
-/// Searches the raw file content for a pattern with flexible whitespace:
-/// `keyword  "type_name"  "local_name"`. Skips lines inside comments
-/// (`#`, `//` line comments, and `/* ... */` block comments).
+/// Parses the content with ast-grep's HCL language support and uses the pattern
+/// `resource $TYPE $NAME $BODY` to find resource blocks. Matches by checking the
+/// `$TYPE` and `$NAME` metavariable values against the provided `type_name` and
+/// `local_name`.
 ///
-/// The returned `Location` spans from the start of the keyword to the end
-/// of the matched declaration on that line.
-///
-/// **Limitation:** All three tokens (keyword, type, name) must appear on the
-/// same line. Multi-line declarations (e.g., type and name on separate lines)
-/// are not matched and will return `None`. In practice this is not an issue
-/// because `terraform fmt` always places the full declaration on one line,
-/// and this is the universal convention.
+/// The returned `Location` spans the entire resource block (from `resource` keyword
+/// to the closing `}`), providing precise AST-level positioning.
 ///
 /// Returns `None` if not found; the caller falls back to a (1, 1) location.
 fn find_block_location(
     content: &str,
     source_path: &Path,
-    keyword: &str,
+    _keyword: &str,
     type_name: &str,
     local_name: &str,
 ) -> Option<Location> {
-    // Build a regex that tolerates any amount of whitespace between tokens.
-    // `regex::escape` ensures type_name/local_name are treated literally.
-    let trimmed_pattern = format!(
-        r#"^{}\s+"{}"\s+"{}""#,
-        regex::escape(keyword),
-        regex::escape(type_name),
-        regex::escape(local_name),
-    );
-    let trimmed_re = regex::Regex::new(&trimmed_pattern).ok()?;
+    let ast_grep = Hcl.ast_grep(content);
+    let root = ast_grep.root();
 
-    // Pattern for matching against the raw (untrimmed) line to get column offsets
-    let raw_pattern = format!(
-        r#"({})\s+"{}"\s+"{}""#,
-        regex::escape(keyword),
-        regex::escape(type_name),
-        regex::escape(local_name),
-    );
-    let raw_re = regex::Regex::new(&raw_pattern).ok()?;
+    let pattern = "resource $TYPE $NAME $BODY";
 
-    let mut in_block_comment = false;
+    for node_match in root.find_all(pattern) {
+        let env = node_match.get_env();
 
-    for (i, raw_line) in content.lines().enumerate() {
-        let trimmed = raw_line.trim();
+        let matched_type = env.get_match("TYPE")?;
+        let matched_name = env.get_match("NAME")?;
 
-        // Track /* ... */ block comments
-        if in_block_comment {
-            if let Some(pos) = trimmed.find("*/") {
-                in_block_comment = false;
-                let remainder = &trimmed[pos + 2..];
-                if trimmed_re.is_match(remainder.trim()) {
-                    return Some(line_to_location(source_path, raw_line, i, &raw_re));
-                }
-            }
-            continue;
-        }
+        // Strip surrounding quotes for comparison
+        let type_text = matched_type.text();
+        let name_text = matched_name.text();
+        let matched_type_text = type_text.trim_matches('"');
+        let matched_name_text = name_text.trim_matches('"');
 
-        // Skip line comments
-        if trimmed.starts_with('#') || trimmed.starts_with("//") {
-            continue;
-        }
-
-        // Detect block comment start
-        if trimmed.starts_with("/*") {
-            if !trimmed.contains("*/") {
-                in_block_comment = true;
-            }
-            continue;
-        }
-
-        if trimmed_re.is_match(trimmed) {
-            return Some(line_to_location(source_path, raw_line, i, &raw_re));
+        if matched_type_text == type_name && matched_name_text == local_name {
+            let node = node_match.get_node();
+            let start = node.start_pos();
+            let end = node.end_pos();
+            return Some(Location::new(
+                source_path.to_path_buf(),
+                // tree-sitter positions are 0-based; Location uses 1-based
+                (start.line() + 1, start.column(&node) + 1),
+                (end.line() + 1, end.column(&node) + 1),
+            ));
         }
     }
     None
-}
-
-/// Build a `Location` for a matched line with accurate column offsets.
-///
-/// `line_idx` is 0-based; positions in `Location` are 1-based.
-/// The start column is where the keyword begins in the raw line.
-/// The end column is the end of the matched declaration text.
-fn line_to_location(
-    source_path: &Path,
-    raw_line: &str,
-    line_idx: usize,
-    keyword_re: &regex::Regex,
-) -> Location {
-    let line_1based = line_idx + 1;
-    let (start_col, end_col) = if let Some(m) = keyword_re.find(raw_line) {
-        (m.start() + 1, m.end())
-    } else {
-        // Fallback: span from first non-whitespace to end of trimmed line
-        let leading = raw_line.len() - raw_line.trim_start().len();
-        (leading + 1, raw_line.trim_end().len())
-    };
-    Location::new(
-        source_path.to_path_buf(),
-        (line_1based, start_col),
-        (line_1based, end_col),
-    )
 }
 
 /// Discover all `.tf` files in a directory recursively.
@@ -452,8 +399,8 @@ resource "aws_s3_bucket" "data_bucket" {
             resource_type: "aws_s3_bucket",
             local_name: "data_bucket",
             attributes: vec![("bucket", AttributeValue::Literal("my-app-data".into()))],
-            // `resource "aws_s3_bucket" "data_bucket"` = 38 chars
-            expected_location: Some((2, 1, 2, 38)),
+            // ast-grep spans entire block: line 2 col 1 to line 4 col 2 (after `}`)
+            expected_location: Some((2, 1, 4, 2)),
         }],
     )]
     // Multiple resources: S3 + DynamoDB + Lambda
@@ -481,20 +428,17 @@ resource "aws_lambda_function" "func1" {
             ExpectedResource {
                 resource_type: "aws_s3_bucket", local_name: "bucket1",
                 attributes: vec![("bucket", AttributeValue::Literal("first-bucket".into()))],
-                // `resource "aws_s3_bucket" "bucket1"` = 34 chars
-                expected_location: Some((2, 1, 2, 34)),
+                expected_location: Some((2, 1, 4, 2)),
             },
             ExpectedResource {
                 resource_type: "aws_dynamodb_table", local_name: "table1",
                 attributes: vec![("name", AttributeValue::Literal("my-table".into()))],
-                // `resource "aws_dynamodb_table" "table1"` = 38 chars
-                expected_location: Some((6, 1, 6, 38)),
+                expected_location: Some((6, 1, 9, 2)),
             },
             ExpectedResource {
                 resource_type: "aws_lambda_function", local_name: "func1",
                 attributes: vec![("function_name", AttributeValue::Literal("my-function".into()))],
-                // `resource "aws_lambda_function" "func1"` = 38 chars, on line 11
-                expected_location: Some((11, 1, 11, 38)),
+                expected_location: Some((11, 1, 16, 2)),
             },
         ],
     )]
@@ -510,8 +454,8 @@ resource "azurerm_storage_account" "azure" { name = "myazurestorage" }
         vec![ExpectedResource {
             resource_type: "aws_s3_bucket", local_name: "s3",
             attributes: vec![("bucket", AttributeValue::Literal("my-s3-bucket".into()))],
-            // `resource "aws_s3_bucket" "s3"` = 29 chars
-            expected_location: Some((3, 1, 3, 29)),
+            // Single-line block: ast-grep spans to end of `}`
+            expected_location: Some((3, 1, 3, 58)),
         }],
     )]
     // Interpolation preserved as Expression
@@ -526,8 +470,8 @@ resource "aws_s3_bucket" "dynamic_bucket" {
         vec![ExpectedResource {
             resource_type: "aws_s3_bucket", local_name: "dynamic_bucket",
             attributes: vec![("bucket", AttributeValue::Expression("${var.prefix}-data-bucket".into()))],
-            // `resource "aws_s3_bucket" "dynamic_bucket"` = 41 chars
-            expected_location: Some((2, 1, 2, 41)),
+            // ast-grep spans entire block
+            expected_location: Some((2, 1, 4, 2)),
         }],
     )]
     // Bare variable reference preserved as Expression
@@ -542,8 +486,8 @@ resource "aws_s3_bucket" "var_bucket" {
         vec![ExpectedResource {
             resource_type: "aws_s3_bucket", local_name: "var_bucket",
             attributes: vec![("bucket", AttributeValue::Expression("var.bucket_name".into()))],
-            // `resource "aws_s3_bucket" "var_bucket"` = 37 chars
-            expected_location: Some((2, 1, 2, 37)),
+            // ast-grep spans entire block
+            expected_location: Some((2, 1, 4, 2)),
         }],
     )]
     // Data, variable, output blocks are ignored
@@ -563,8 +507,8 @@ output "bucket_arn" { value = aws_s3_bucket.bucket.arn }
         vec![ExpectedResource {
             resource_type: "aws_s3_bucket", local_name: "bucket",
             attributes: vec![("bucket", AttributeValue::Literal("my-bucket".into()))],
-            // `resource "aws_s3_bucket" "bucket"` = 33 chars
-            expected_location: Some((2, 1, 2, 33)),
+            // Single-line block: `resource "aws_s3_bucket" "bucket" { bucket = "my-bucket" }` = 59 chars
+            expected_location: Some((2, 1, 2, 59)),
         }],
     )]
     // Numeric and bool attributes stored as Literal strings
@@ -586,8 +530,8 @@ resource "aws_dynamodb_table" "t" {
                 ("read_capacity", AttributeValue::Literal("5".into())),
                 ("stream_enabled", AttributeValue::Literal("true".into())),
             ],
-            // `resource "aws_dynamodb_table" "t"` = 33 chars
-            expected_location: Some((2, 1, 2, 33)),
+            // ast-grep spans entire block
+            expected_location: Some((2, 1, 7, 2)),
         }],
     )]
     // Location tracking with line and column
@@ -607,14 +551,13 @@ resource "aws_s3_bucket" "second" {
             ExpectedResource {
                 resource_type: "aws_s3_bucket", local_name: "first",
                 attributes: vec![],
-                // `resource "aws_s3_bucket" "first"` = 32 chars at line 2
-                expected_location: Some((2, 1, 2, 32)),
+                // ast-grep spans entire block
+                expected_location: Some((2, 1, 4, 2)),
             },
             ExpectedResource {
                 resource_type: "aws_s3_bucket", local_name: "second",
                 attributes: vec![],
-                // `resource "aws_s3_bucket" "second"` = 33 chars at line 6
-                expected_location: Some((6, 1, 6, 33)),
+                expected_location: Some((6, 1, 8, 2)),
             },
         ],
     )]
@@ -634,8 +577,8 @@ resource "aws_s3_bucket" "b" {
         vec![ExpectedResource {
             resource_type: "aws_s3_bucket", local_name: "b",
             attributes: vec![("bucket", AttributeValue::Literal("real-bucket".into()))],
-            // `resource "aws_s3_bucket" "b"` = 28 chars at line 6
-            expected_location: Some((6, 1, 6, 28)),
+            // ast-grep spans entire block
+            expected_location: Some((6, 1, 8, 2)),
         }],
     )]
     // Empty body resource
@@ -648,8 +591,8 @@ resource "aws_s3_bucket" "empty" {}
         vec![ExpectedResource {
             resource_type: "aws_s3_bucket", local_name: "empty",
             attributes: vec![],
-            // `resource "aws_s3_bucket" "empty"` = 32 chars
-            expected_location: Some((2, 1, 2, 32)),
+            // Single-line: `resource "aws_s3_bucket" "empty" {}` = 35 chars → end col 36
+            expected_location: Some((2, 1, 2, 36)),
         }],
     )]
     fn test_parse_hcl_content(
@@ -774,37 +717,37 @@ resource "aws_s3_bucket" "b" {
     #[case(
         "basic_at_line_1",
         "resource \"aws_s3_bucket\" \"b\" {\n  bucket = \"x\"\n}",
-        (1, 1, 1, 28) 
+        (1, 1, 3, 2) // ast-grep spans entire block: line 1 to closing `}` on line 3
     )]
     #[case(
         "with_leading_blank_line",
         "\nresource \"aws_s3_bucket\" \"b\" {\n}",
-        (2, 1, 2, 28)
+        (2, 1, 3, 2) // block spans line 2 to closing `}` on line 3
     )]
     #[case(
         "indented_2_spaces",
         "  resource \"aws_s3_bucket\" \"b\" {\n}",
-        (1, 3, 1, 30)
+        (1, 3, 2, 2) // starts at col 3 (indented), ends at `}` on line 2
     )]
     #[case(
         "indented_4_spaces",
         "    resource \"aws_s3_bucket\" \"b\" {\n}",
-        (1, 5, 1, 32)
+        (1, 5, 2, 2) // starts at col 5 (indented), ends at `}` on line 2
     )]
     #[case(
         "after_comment_lines",
         "# comment\n// another comment\nresource \"aws_s3_bucket\" \"b\" {\n}",
-        (3, 1, 3, 28)
+        (3, 1, 4, 2) // block at line 3, closing `}` on line 4
     )]
     #[case(
         "after_block_comment",
         "/* block\ncomment */\nresource \"aws_s3_bucket\" \"b\" {\n}",
-        (3, 1, 3, 28)
+        (3, 1, 4, 2) // block at line 3, closing `}` on line 4
     )]
     #[case(
         "extra_whitespace_between_tokens",
         "resource   \"aws_s3_bucket\"   \"b\" {\n}",
-        (1, 1, 1, 32) // regex matches through extra spaces
+        (1, 1, 2, 2) // ast-grep spans entire block
     )]
     fn test_find_block_location(
         #[case] _name: &str,
