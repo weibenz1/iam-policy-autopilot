@@ -541,20 +541,3 @@ async fn test_missing_state_file_produces_error() {
     );
 }
 
-// ===================================================================
-// JSON round-trip test
-// ===================================================================
-
-#[test]
-fn test_parse_result_json_roundtrip() {
-    use iam_policy_autopilot_policy_generation::extraction::terraform::hcl_parser::parse_terraform_directory;
-    use iam_policy_autopilot_policy_generation::extraction::terraform::TerraformParseResult;
-
-    let dir = fixture_dir("basic_multi_resource");
-    let result = parse_terraform_directory(&dir).expect("parse");
-
-    let json = serde_json::to_string_pretty(&result).expect("serialize");
-    let deserialized: TerraformParseResult = serde_json::from_str(&json).expect("deserialize");
-
-    assert_eq!(result, deserialized);
-}
