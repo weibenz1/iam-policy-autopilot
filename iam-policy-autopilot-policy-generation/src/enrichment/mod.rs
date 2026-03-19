@@ -330,6 +330,15 @@ impl Action {
             explanation,
         }
     }
+
+    /// Extract the service prefix from this action's name.
+    ///
+    /// For `"s3:GetObject"` returns `"s3"`. If no colon is present,
+    /// returns the full name.
+    #[must_use]
+    pub(crate) fn service(&self) -> &str {
+        self.name.split(':').next().unwrap_or(&self.name)
+    }
 }
 
 /// Represents a resource enriched with ARN pattern and metadata
