@@ -8,8 +8,6 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
-
 use crate::Location;
 
 pub mod hcl_parser;
@@ -22,7 +20,7 @@ pub const AWS_RESOURCE_PREFIX: &str = "aws_";
 pub mod variable_resolver;
 
 /// Represents a Terraform attribute value, which may be a literal or an unresolvable expression.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributeValue {
     /// A resolved literal string value (e.g., `"my-app-bucket"`)
     Literal(String),
@@ -49,7 +47,7 @@ impl AttributeValue {
 }
 
 /// A parsed Terraform resource block (e.g., `resource "aws_s3_bucket" "my_bucket" { ... }`)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerraformResource {
     /// Terraform resource type (e.g., `"aws_s3_bucket"`, `"aws_dynamodb_table"`)
     pub resource_type: String,
@@ -71,7 +69,6 @@ pub type TerraformResourceMap = HashMap<TerraformBlockKey, TerraformResource>;
 /// Result of parsing Terraform configuration files in a directory.
 ///
 /// Resources are keyed by `(type, local_name)` for O(1) lookup.
-/// Custom serde is used because tuple-keyed HashMaps don't serialize to JSON natively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerraformParseResult {
     /// Discovered AWS resource blocks keyed by `(resource_type, local_name)`
@@ -88,36 +85,6 @@ impl TerraformParseResult {
             resources: TerraformResourceMap::new(),
             warnings: Vec::new(),
         }
-    }
-}
-
-// Custom serde: serialize resources as Vec for JSON compatibility.
-impl Serialize for TerraformParseResult {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("TerraformParseResult", 2)?;
-        let resources: Vec<&TerraformResource> = self.resources.values().collect();
-        state.serialize_field("resources", &resources)?;
-        state.serialize_field("warnings", &self.warnings)?;
-        state.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for TerraformParseResult {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Raw {
-            resources: Vec<TerraformResource>,
-            warnings: Vec<String>,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        let mut result = Self::empty();
-        result.warnings = raw.warnings;
-        for r in raw.resources {
-            let key = (r.resource_type.clone(), r.local_name.clone());
-            result.resources.insert(key, r);
-        }
-        Ok(result)
     }
 }
 
@@ -167,49 +134,4 @@ mod tests {
         assert!(result.warnings.is_empty());
     }
 
-    #[test]
-    fn test_serialize_deserialize_roundtrip() {
-        let resource = TerraformResource {
-            resource_type: "aws_s3_bucket".to_string(),
-            local_name: "test".to_string(),
-            attributes: HashMap::from([
-                (
-                    "bucket".to_string(),
-                    AttributeValue::Literal("my-bucket".to_string()),
-                ),
-                (
-                    "tags".to_string(),
-                    AttributeValue::Expression("var.tags".to_string()),
-                ),
-            ]),
-            location: Location::new(PathBuf::from("main.tf"), (1, 1), (1, 1)),
-        };
-
-        let json = serde_json::to_string(&resource).unwrap();
-        let deserialized: TerraformResource = serde_json::from_str(&json).unwrap();
-        assert_eq!(resource, deserialized);
-    }
-
-    #[test]
-    fn test_parse_result_serialize_deserialize_roundtrip() {
-        let mut result = TerraformParseResult::empty();
-        let resource = TerraformResource {
-            resource_type: "aws_s3_bucket".to_string(),
-            local_name: "bucket".to_string(),
-            attributes: HashMap::from([(
-                "bucket".to_string(),
-                AttributeValue::Literal("test-bucket".to_string()),
-            )]),
-            location: Location::new(PathBuf::from("main.tf"), (1, 1), (1, 1)),
-        };
-        result.resources.insert(
-            (resource.resource_type.clone(), resource.local_name.clone()),
-            resource,
-        );
-        result.warnings.push("some warning".to_string());
-
-        let json = serde_json::to_string(&result).unwrap();
-        let deserialized: TerraformParseResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(result, deserialized);
-    }
 }
