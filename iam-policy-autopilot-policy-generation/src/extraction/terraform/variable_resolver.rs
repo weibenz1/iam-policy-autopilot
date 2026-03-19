@@ -202,12 +202,15 @@ impl VariableContext {
     /// Unresolvable placeholders are left as-is.
     fn resolve_interpolation(&self, s: &str) -> String {
         let re = var_interpolation_regex();
+        // caps[0] = entire match (e.g. "${var.bucket_name}")
+        // caps[1] = capture group: the variable name (e.g. "bucket_name")
+        // Group 1 is always present when the regex matches (mandatory group),
+        // but we handle None defensively via and_then.
         re.replace_all(s, |caps: &regex::Captures| {
-            let var_name = caps.get(1).map_or("", |m| m.as_str());
-            match self.vars.get(var_name) {
-                Some(value) => value.clone(),
-                None => caps[0].to_string(), // Leave unresolvable as-is
-            }
+            caps.get(1)
+                .map(|m| m.as_str())
+                .and_then(|var_name| self.vars.get(var_name).cloned())
+                .unwrap_or_else(|| caps[0].to_string()) // Leave unresolvable as-is
         })
         .into_owned()
     }
