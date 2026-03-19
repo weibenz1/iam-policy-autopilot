@@ -292,7 +292,7 @@ impl TerraformResourceResolver {
                     .actions
                     .iter()
                     .map(|action| {
-                        let service = extract_service_from_action(&action.name);
+                        let service = action.service();
                         let new_resources: Vec<Resource> = action
                             .resources
                             .iter()
@@ -775,10 +775,6 @@ fn placeholder_to_attribute_candidates(placeholder: &str) -> Vec<String> {
     candidates
 }
 
-/// Extract the service name from an IAM action string (e.g., "s3" from "s3:GetObject").
-fn extract_service_from_action(action_name: &str) -> &str {
-    action_name.split(':').next().unwrap_or(action_name)
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1393,8 +1389,9 @@ mod tests {
     #[case("s3:GetObject", "s3")]
     #[case("dynamodb:PutItem", "dynamodb")]
     #[case("nocolon", "nocolon")]
-    fn test_extract_service_from_action_cases(#[case] action: &str, #[case] expected: &str) {
-        assert_eq!(extract_service_from_action(action), expected);
+    fn test_action_service(#[case] action_name: &str, #[case] expected: &str) {
+        let action = Action::new(action_name.to_string(), vec![], vec![], Explanation::default());
+        assert_eq!(action.service(), expected);
     }
 
     #[rstest]
