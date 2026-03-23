@@ -106,7 +106,6 @@ impl TerraformStateResources {
     }
 
     /// Merge another collection into this one.
-    /// Merge another collection into this one.
     ///
     /// Resources from `other` are added. Duplicates (same identity) are
     /// automatically deduplicated by the `HashSet`.
@@ -183,57 +182,36 @@ fn parse_terraform_state_content(
 
 /// Find the location of an ARN value in JSON content using ast-grep tree-sitter parsing.
 ///
-/// Parses the content with ast-grep's JSON language support and walks the tree-sitter
-/// AST to find `pair` nodes where the key is `"arn"`. Matches by comparing the value
-/// text (stripped of quotes) against the provided `value`.
+/// Parses the content as JSON, then uses a DFS traversal to find `pair` nodes
+/// where the key is `"arn"` and the value matches the provided string.
+///
+/// Note: We use node-kind filtering rather than ast-grep's `find_all(pattern)`
+/// because JSON pairs (`"key": value`) are not standalone nodes — they're always
+/// children of objects. ast-grep patterns must parse to a single root node, so
+/// `"arn": $VALUE` is rejected with `MultipleNode`.
 ///
 /// Returns a `Location` pointing at the ARN value node (the string literal including quotes).
 fn find_string_location(content: &str, source_path: &Path, value: &str) -> Option<Location> {
     let ast_grep = Json.ast_grep(content);
     let root = ast_grep.root();
 
-    // Walk all nodes via DFS to find "pair" nodes with key "arn"
-    find_arn_value_in_tree(&root, source_path, value)
-}
-
-/// Recursively walk the AST tree to find a JSON pair node with key `"arn"` whose
-/// value matches the given string. Returns the `Location` of the value node.
-fn find_arn_value_in_tree<D: ast_grep_core::Doc>(
-    node: &ast_grep_core::Node<D>,
-    source_path: &Path,
-    value: &str,
-) -> Option<Location> {
-    if node.kind() == "pair" {
-        // A JSON pair node has children: key (string), ":", value
-        // Check if the key is "arn"
+    // DFS: find "pair" nodes with key "arn" whose value matches
+    for node in root.dfs() {
+        if node.kind() != "pair" {
+            continue;
+        }
         let mut children = node.children();
-        if let Some(key_node) = children.next() {
-            let key_text = key_node.text();
-            if key_text.trim_matches('"') == "arn" {
-                // Find the value child (skip the ":" separator)
-                for child in children {
-                    if child.kind() != ":" {
-                        let child_text = child.text();
-                        let unquoted = child_text.trim_matches('"');
-                        if unquoted == value {
-                            let start = child.start_pos();
-                            let end = child.end_pos();
-                            return Some(Location::new(
-                                source_path.to_path_buf(),
-                                (start.line() + 1, start.column(&child) + 1),
-                                (end.line() + 1, end.column(&child) + 1),
-                            ));
-                        }
-                    }
+        let key_node = children.next()?;
+        if key_node.text().trim_matches('"') != "arn" {
+            continue;
+        }
+        // Skip ":" separator, then check value
+        for child in children {
+            if child.kind() != ":" {
+                if child.text().trim_matches('"') == value {
+                    return Some(Location::from_node(source_path.to_path_buf(), &child));
                 }
             }
-        }
-    }
-
-    // Recurse into children
-    for child in node.children() {
-        if let Some(loc) = find_arn_value_in_tree(&child, source_path, value) {
-            return Some(loc);
         }
     }
     None

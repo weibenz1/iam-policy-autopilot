@@ -140,7 +140,7 @@ fn extract_resource_block(
 
     let attributes = extract_block_attributes(&block.body);
     let location =
-        find_block_location(content, source_path, "resource", resource_type, local_name)
+        find_block_location(content, source_path, resource_type, local_name)
             .unwrap_or_else(|| Location::new(source_path.to_path_buf(), (1, 1), (1, 1)));
 
     Some(TerraformResource {
@@ -222,8 +222,7 @@ fn expression_to_attribute_value(expr: &hcl::Expression) -> AttributeValue {
 fn find_block_location(
     content: &str,
     source_path: &Path,
-    _keyword: &str,
-    type_name: &str,
+    resource_type: &str,
     local_name: &str,
 ) -> Option<Location> {
     let ast_grep = Hcl.ast_grep(content);
@@ -243,16 +242,9 @@ fn find_block_location(
         let matched_type_text = type_text.trim_matches('"');
         let matched_name_text = name_text.trim_matches('"');
 
-        if matched_type_text == type_name && matched_name_text == local_name {
+        if matched_type_text == resource_type && matched_name_text == local_name {
             let node = node_match.get_node();
-            let start = node.start_pos();
-            let end = node.end_pos();
-            return Some(Location::new(
-                source_path.to_path_buf(),
-                // tree-sitter positions are 0-based; Location uses 1-based
-                (start.line() + 1, start.column(&node) + 1),
-                (end.line() + 1, end.column(&node) + 1),
-            ));
+            return Some(Location::from_node(source_path.to_path_buf(), node));
         }
     }
     None
@@ -798,7 +790,7 @@ resource "aws_s3_bucket" "b" {
         #[case] content: &str,
         #[case] expected: Option<(usize, usize, usize, usize)>,
     ) {
-        let result = find_block_location(content, Path::new("test.tf"), "resource", "aws_s3_bucket", "b");
+        let result = find_block_location(content, Path::new("test.tf"), "aws_s3_bucket", "b");
         match expected {
             None => assert!(result.is_none(), "[{_name}] expected None"),
             Some((start_line, start_col, end_line, end_col)) => {
