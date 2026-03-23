@@ -652,7 +652,9 @@ resource "aws_s3_bucket" "b" {
         }
 
         let mut result = TerraformResources::default();
-        result.parse_directory(tmp.path()).expect("should parse dir");
+        result
+            .parse_directory(tmp.path())
+            .expect("should parse dir");
 
         assert_eq!(result.len(), expected_count, "resource count mismatch");
 

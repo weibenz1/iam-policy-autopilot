@@ -174,8 +174,8 @@ impl TerraformResourceResolver {
                     log::warn!("Failed to resolve Terraform variables: {e}");
                     VariableContext::default()
                 })
-        } else if !tfvars_paths.is_empty() && !terraform_files.is_empty() {
-            VariableContext::from_explicit_tfvars(tfvars_paths)
+        } else if !terraform_files.is_empty() {
+            VariableContext::from_files_and_tfvars(terraform_files, tfvars_paths)
         } else {
             VariableContext::default()
         };

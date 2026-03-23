@@ -28,23 +28,36 @@ pub(crate) struct VariableContext {
 }
 
 impl VariableContext {
-    /// Build a variable context from only explicit `.tfvars` file paths (no directory).
+    /// Build a variable context from explicit `.tf` and `.tfvars` file paths (no directory).
     ///
     /// Used when `--terraform-file` + `--tfvars` are provided without `--terraform-dir`.
-    pub(crate) fn from_explicit_tfvars(tfvars_paths: &[PathBuf]) -> Self {
+    ///
+    /// 1. Extracts `variable` block defaults from the given `.tf` files
+    /// 2. Applies explicit `.tfvars` overrides in order
+    pub(crate) fn from_files_and_tfvars(tf_files: &[PathBuf], tfvars_paths: &[PathBuf]) -> Self {
         let mut ctx = Self::default();
+
+        // Step 1: Extract variable defaults from .tf files
+        for tf_file in tf_files {
+            match std::fs::read_to_string(tf_file) {
+                Ok(content) => ctx.extract_variable_defaults(&content, tf_file),
+                Err(e) => log::warn!("Failed to read {}: {e}", tf_file.display()),
+            }
+        }
+
+        // Step 2: Apply explicit tfvars overrides
         for tfvars_file in tfvars_paths {
             match std::fs::read_to_string(tfvars_file) {
                 Ok(content) => ctx.apply_tfvars(&content),
-                Err(e) => log::warn!(
-                    "Failed to read explicit tfvars file {}: {e}",
-                    tfvars_file.display()
-                ),
+                Err(e) => log::warn!("Failed to read tfvars file {}: {e}", tfvars_file.display()),
             }
         }
+
         log::debug!(
-            "Resolved {} Terraform variables from explicit tfvars",
-            ctx.vars.len()
+            "Resolved {} Terraform variables from {} tf + {} tfvars files",
+            ctx.vars.len(),
+            tf_files.len(),
+            tfvars_paths.len()
         );
         ctx
     }

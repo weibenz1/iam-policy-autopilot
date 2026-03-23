@@ -3,7 +3,7 @@
 //! This module parses the embedded HCL file into a structured representation
 //! that retains the `sdk.arn_namespace` and `resource_prefix` fields (both
 //! `actual` regex and `correct` prefix). It pre-computes a reversed mapping
-//! from Terraform resource types to `(arn_namespace, resource_suffix)` tuples,
+//! from Terraform resource types to `(arn_namespace, resource_type)` tuples,
 //! using exact HashMap lookups for the vast majority of patterns and falling
 //! back to regex only for the handful of patterns that require it.
 
@@ -89,7 +89,7 @@ struct ResourcePrefix {
 // ---------------------------------------------------------------------------
 
 /// Pre-computed lookup structure for resolving Terraform resource types
-/// to `(arn_namespace, resource_suffix)` tuples.
+/// to `(arn_namespace, resource_type)` tuples.
 ///
 /// # Examples
 ///
@@ -196,7 +196,7 @@ impl TerraformServiceAndResourceResolver {
     }
 
     /// Resolve a Terraform resource type like `"aws_s3_bucket"` into an
-    /// `(arn_namespace, resource_suffix)` tuple (e.g., `("s3", "bucket")`).
+    /// `(arn_namespace, resource_type)` tuple (e.g., `("s3", "bucket")`).
     ///
     /// The tuple can be used to obtain necessary information from service_reference
     /// for proper resource arn generation.
@@ -211,23 +211,23 @@ impl TerraformServiceAndResourceResolver {
     pub(super) fn resolve(&self, terraform_type: &str) -> Option<(String, String)> {
         // 1. Exact full-type lookup (e.g., "aws_canonical_user_id" → s3)
         if let Some(arn_ns) = self.exact_map.get(terraform_type) {
-            let suffix = terraform_type
+            let resource_type = terraform_type
                 .strip_prefix(crate::extraction::terraform::AWS_RESOURCE_PREFIX)
                 .unwrap_or(terraform_type);
-            return Some((arn_ns.clone(), suffix.to_string()));
+            return Some((arn_ns.clone(), resource_type.to_string()));
         }
 
         // 2. Regex fallback — before prefix matching so overrides win
         for (regex, arn_ns, correct_prefix) in &self.regex_fallbacks {
             if regex.is_match(terraform_type) {
-                let suffix = if terraform_type.starts_with(correct_prefix.as_str()) {
+                let resource_type = if terraform_type.starts_with(correct_prefix.as_str()) {
                     &terraform_type[correct_prefix.len()..]
                 } else {
                     terraform_type
                         .strip_prefix(crate::extraction::terraform::AWS_RESOURCE_PREFIX)
                         .unwrap_or(terraform_type)
                 };
-                return Some((arn_ns.clone(), suffix.to_string()));
+                return Some((arn_ns.clone(), resource_type.to_string()));
             }
         }
 
@@ -238,8 +238,8 @@ impl TerraformServiceAndResourceResolver {
             .filter(|(prefix, _)| terraform_type.starts_with(prefix.as_str()))
             .max_by_key(|(prefix, _)| prefix.len())
         {
-            let suffix = &terraform_type[prefix.len()..];
-            return Some((arn_ns.clone(), suffix.to_string()));
+            let resource_type = &terraform_type[prefix.len()..];
+            return Some((arn_ns.clone(), resource_type.to_string()));
         }
 
         None
@@ -553,7 +553,7 @@ mod tests {
 
     // --- TypeResolver::resolve tests (parameterized) ---
 
-    /// Parameterized test for successful Terraform type → (service, suffix) resolution.
+    /// Parameterized test for successful Terraform type → (service, resource_type) resolution.
     ///
     /// Each case represents a different resolution strategy:
     /// - Prefix match via `correct` prefix (e.g., aws_sqs_queue)
@@ -596,7 +596,7 @@ mod tests {
         );
         assert_eq!(
             resource_type, expected_resource_type,
-            "suffix mismatch for '{terraform_type}'"
+            "resource_type mismatch for '{terraform_type}'"
         );
     }
 

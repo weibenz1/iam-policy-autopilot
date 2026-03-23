@@ -28,13 +28,13 @@ This design extends the `generate-policies` command with optional Terraform inte
 
 ## 2. Motivation
 
-Organizations using Infrastructure-as-Code (IaC) already declare their AWS resources in Terraform. When an application references `s3_client.get_object(Bucket="my-app-data-bucket")`, and a Terraform file declares `resource "aws_s3_bucket" "data" { bucket = "my-app-data-bucket" }`, the tool can bind the SDK call's resource ARN to the specific bucket rather than a wildcard.
+Customers using Infrastructure-as-Code (IaC) already declare their AWS resources in Terraform. When an application references `s3_client.get_object(Bucket="my-app-data-bucket")`, and a Terraform file declares `resource "aws_s3_bucket" "data" { bucket = "my-app-data-bucket" }`, the tool can bind the SDK call's resource ARN to the specific bucket rather than a wildcard.
 
 ### Goals
 
 1. **Concrete resource ARNs** — Replace `${BucketName}`, `${TableName}`, etc. in generated ARN patterns with values extracted from Terraform configuration.
 2. **State file support** — Optionally use `terraform.tfstate` for exact deployed ARNs (including account, region, partition) when available.
-3. **Unified CLI** — Integrate Terraform support as optional flags (`--terraform-dir`, `--tfstate`) on the existing `generate-policies` command rather than a separate subcommand.
+3. **Unified CLI** — Integrate Terraform support as optional flags (`--terraform-dir`, `--terraform-file`, `--tfvars`, `--tfstate`) on the existing `generate-policies` command rather than a separate subcommand.
 4. **Non-disruptive** — When `--terraform-dir` is not provided, behavior is identical to the existing pipeline.
 
 ### Non-Goals
@@ -51,9 +51,15 @@ Organizations using Infrastructure-as-Code (IaC) already declare their AWS resou
 # Existing usage (unchanged)
 iam-policy-autopilot generate-policies handler.py --region us-east-1 --account 123456789012
 
-# New: with Terraform resource binding
+# New: with Terraform directory (auto-discovers .tf, .tfvars, .tfstate)
 iam-policy-autopilot generate-policies handler.py \
     --terraform-dir ./infra \
+    --region us-east-1 --account 123456789012
+
+# New: with individual Terraform files + explicit tfvars
+iam-policy-autopilot generate-policies handler.py \
+    --terraform-file ./infra/main.tf --terraform-file ./infra/variables.tf \
+    --tfvars ./infra/terraform.tfvars \
     --region us-east-1 --account 123456789012
 
 # New: with Terraform state for exact ARNs
@@ -73,10 +79,10 @@ When Terraform bindings are active, the output includes a `ResourceBindingExplan
   "ResourceBindingExplanations": [
     {
       "Arn": "arn:aws:s3:::my-app-data-bucket",
-      "Source": "HCL",
-      "TerraformResourceType": "aws_s3_bucket",
-      "TerraformResourceName": "data_bucket",
-      "Location": "main.tf:5"
+      "Source": "Terraform",
+      "ResourceType": "aws_s3_bucket",
+      "ResourceName": "data_bucket",
+      "Location": "main.tf:5.1-7.2"
     }
   ]
 }
@@ -84,21 +90,35 @@ When Terraform bindings are active, the output includes a `ResourceBindingExplan
 
 ## 4. Architecture
 
-### Pipeline Flow
+### Resolution workflow
 
 The Terraform integration extends the existing extract → enrich → generate pipeline with two additional phases:
 
 ```
+┌──────────────── Terraform Resolution (optional) ───────────────┐
+│                                                                 │
+│  .tf files ──→ HCL Parser ──→ TerraformResources                │
+│  .tfvars   ──→ Variable Resolver ──→ resolved attributes        │
+│  .tfstate  ──→ State Parser ──→ TerraformStateResources         │
+│                      │                                          │
+│                      ▼                                          │
+│  Service Resolver: aws_s3_bucket → (s3, bucket)                 │
+│  ARN Pattern Lookup (via SDF): s3/bucket → arn patterns         │
+│  Naming Attribute Derivation: ${BucketName} → "bucket" attr     │
+│  State ARN Attachment: deployed ARN takes precedence             │
+│                      │                                          │
+│                      ▼                                          │
+│  TerraformResourceResolver (ResolvedResourceMap)                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
 ┌─────────────────────── Extraction Phase ───────────────────────┐
 │                                                                 │
 │  Source Files (.py, .go, .ts, .js)                              │
 │       │                                                         │
 │       ▼                                                         │
 │  ExtractionEngine → SdkMethodCall[]                             │
-│                                                                 │
-│  Terraform Files (.tf)  ──→  HCL Parser ──→ TerraformResource[] │
-│  Variable Defaults      ──→  Variable Resolver                  │
-│  terraform.tfstate      ──→  State Parser ──→ StateResourceMap  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -107,16 +127,16 @@ The Terraform integration extends the existing extract → enrich → generate p
 │                                                                 │
 │  SdkMethodCall[] → EnrichmentEngine → EnrichedSdkMethodCall[]   │
 │                                                                 │
-│  TerraformResource[] ──→ Service Resolver ──→ (service, suffix) │
-│  (service, suffix)   ──→ ARN Pattern Lookup (via SDF)           │
-│  Naming attributes   ──→ Concrete ARN derivation                │
-│  StateResourceMap    ──→ State ARN attachment                   │
-│                           │                                     │
-│                           ▼                                     │
-│  EnrichedSdkMethodCall[] + ResolvedResourceMap                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌───────────────── ARN Substitution (optional) ──────────────────┐
+│                                                                 │
+│  EnrichedSdkMethodCall[] + TerraformResourceResolver            │
 │       │                                                         │
 │       ▼                                                         │
-│  ARN Substitution: replace ${BucketName} with concrete values   │
+│  substitute_enriched_calls: replace ${BucketName} etc.          │
+│  with concrete values from resolved Terraform resources         │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -128,76 +148,7 @@ The Terraform integration extends the existing extract → enrich → generate p
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Module Structure
-
-```
-extraction/terraform/
-├── mod.rs                  # Shared types: TerraformResource, AttributeValue, TerraformParseResult
-├── hcl_parser.rs           # Parses .tf files → resource blocks
-├── variable_resolver.rs    # Resolves var.xxx from defaults + .tfvars
-└── state_parser.rs         # Parses terraform.tfstate for deployed ARNs
-
-enrichment/terraform/
-├── mod.rs
-├── service_resolver.rs     # Maps Terraform types → IAM services via names_data.hcl
-└── resource_binder.rs      # TerraformResourceResolver: ARN derivation + substitution
-```
-
-## 5. Detailed Design
-
-### 5.1 HCL Parsing (`extraction/terraform/hcl_parser.rs`)
-
-Recursively discovers `.tf` files in the provided directory (skipping `.terraform/`), parses them with the `hcl-rs` crate, and extracts `resource` blocks whose type starts with `aws_`.
-
-**Input:** Directory path
-**Output:** `TerraformParseResult` containing a `HashMap<(resource_type, local_name), TerraformResource>`
-
-Each `TerraformResource` captures:
-- Resource type (e.g., `"aws_s3_bucket"`)
-- Local name (e.g., `"data_bucket"`)
-- Attributes as `AttributeValue` (either `Literal` or `Expression`)
-- Source file path and line number
-
-### 5.2 Variable Resolution (`extraction/terraform/variable_resolver.rs`)
-
-Resolves `var.xxx` references in resource attributes by reading:
-1. `variable` block defaults from `.tf` files
-2. Overrides from `terraform.tfvars`
-3. Overrides from `*.auto.tfvars`
-
-Handles bare variable references (`var.bucket_name`) and string interpolation (`"${var.prefix}-bucket"`). Unresolvable expressions remain as `AttributeValue::Expression` and produce wildcard bindings.
-
-### 5.3 State File Parsing (`extraction/terraform/state_parser.rs`)
-
-Parses `terraform.tfstate` (v4 JSON format) and extracts AWS resource instances with their deployed ARNs. State-derived ARNs take precedence over HCL-derived ARNs because they represent the actual deployed infrastructure.
-
-### 5.4 Terraform Service Resolver (`enrichment/terraform/service_resolver.rs`)
-
-Maps Terraform resource types to IAM service names using the embedded `names_data.hcl` from the Terraform AWS provider. For example:
-- `aws_s3_bucket` → `("s3", "bucket")`
-- `aws_dynamodb_table` → `("dynamodb", "table")`
-- `aws_lambda_function` → `("lambda", "function")`
-
-Uses a three-tier resolution strategy:
-1. **Exact match** — for expanded `actual` patterns like `aws_canonical_user_id`
-2. **Regex fallback** — for complex patterns with lookaheads (e.g., CloudWatch vs. CloudWatch Logs)
-3. **Longest prefix match** — for standard `correct` prefixes
-
-### 5.5 Resource Binding (`enrichment/terraform/resource_binder.rs`)
-
-The `TerraformResourceResolver` is the central coordinator. Its `from_directory()` factory method orchestrates:
-
-1. Parse HCL files
-2. Resolve variables
-3. Parse state file (if provided)
-4. For each AWS resource:
-   a. Resolve to IAM service + resource type via service resolver
-   b. Look up ARN patterns from the Service Definition File (SDF)
-   c. Derive the naming attribute from ARN placeholders (e.g., `${BucketName}` → `bucket` attribute)
-   d. Construct an HCL-derived ARN by substituting the naming attribute value
-   e. Attach state-derived ARN if available (takes precedence)
-
-#### ARN Substitution Algorithm
+#### ARN Resolution Algorithm & Priority
 
 For each action's resource ARN pattern:
 
@@ -206,74 +157,16 @@ For each action's resource ARN pattern:
 3. Infrastructure placeholders (`${Partition}`, `${Region}`, `${Account}`) are preserved for the policy generation engine to resolve
 4. For sub-resources (e.g., S3 objects with `${BucketName}/${ObjectName}`), fall back to the parent resource binding and append `/*`
 
-### 5.6 Unified API (`api/generate_policies.rs`)
-
-The `generate_policies()` function accepts optional `terraform_dir` and `tfstate_path` in its config. When `terraform_dir` is present:
-
-```rust
-// 1. Resolve Terraform resources
-let resolver = TerraformResourceResolver::from_directory(
-    terraform_dir, tfstate_path, loader
-).await?;
-
-// 2-4. Standard extraction + enrichment (unchanged)
-let extracted = ExtractionEngine::extract(&source_files).await?;
-let enriched = EnrichmentEngine::enrich(&extracted).await?;
-
-// 5. Terraform ARN substitution
-let bound = resolver.substitute_enriched_calls(&enriched);
-let explanations = resolver.build_binding_explanations();
-
-// 6. Policy generation (unchanged)
-let policies = PolicyGenerationEngine::generate(&bound)?;
-```
-
-## 6. ARN Resolution Priority
-
-| Priority | Source | Example | When Used |
-|---|---|---|---|
-| 1 | `terraform.tfstate` | `arn:aws:s3:::my-app-data-bucket` | `--tfstate` provided and resource found in state |
-| 2 | HCL attributes + SDF patterns | `arn:${Partition}:s3:::my-app-data-bucket` | Resource has a resolvable naming attribute |
-| 3 | Wildcard | `arn:${Partition}:s3:::*` | Expression couldn't be resolved |
-| 4 | Default (no Terraform) | `arn:${Partition}:s3:::${BucketName}` | `--terraform-dir` not provided |
-
-## 7. Supported Resource Types
-
-Any AWS resource type recognized by the Terraform AWS provider's `names_data.hcl` is supported. The embedded data currently covers 300+ service entries. Common examples:
-
-| Terraform Type | IAM Service | Resource Suffix |
-|---|---|---|
-| `aws_s3_bucket` | `s3` | `bucket` |
-| `aws_dynamodb_table` | `dynamodb` | `table` |
-| `aws_sqs_queue` | `sqs` | `queue` |
-| `aws_lambda_function` | `lambda` | `function` |
-| `aws_sns_topic` | `sns` | `topic` |
-| `aws_kinesis_stream` | `kinesis` | `stream` |
-
-## 8. Limitations
+## Limitations
 
 1. **`local.*` and `module.*` references** — Not resolved. These produce wildcard bindings.
 2. **Complex expressions** — Function calls, conditionals, and `for_each` expressions are preserved as-is and produce wildcard bindings.
 3. **Cross-module references** — Module compositions where resources reference outputs from other modules are not followed.
-4. **Non-AWS providers** — Only `aws_*` resource types are processed. Other providers (GCP, Azure) are silently ignored.
 5. **Data sources** — `data` blocks are not processed (deferred for future auto-discovery feature).
 
-## 9. Testing
-
-### Unit Tests
-- HCL parser: 15 tests covering resource extraction, data block handling, expression preservation, line numbers, comment skipping
-- Variable resolver: 12 tests covering defaults, tfvars overrides, interpolation, partial resolution
-- State parser: 14 tests covering ARN extraction, version validation, data source skipping
-- Service resolver: 20+ tests covering exact match, regex fallback, prefix matching
-- Resource binder: 20+ tests covering ARN substitution, state precedence, sub-resource fallback, binding explanations
-
-### Integration Tests
-- 19 tests in `tests/terraform_integration.rs` using sample `.tf` and `.tfstate` fixtures
-- Cover end-to-end: parsing → resolving → ARN substitution with mock service reference data
-
-## 10. Future Work
+## Future Work
 
 1. **Auto-discovery of source files** — Parse `aws_lambda_function` `handler` attributes and `archive_file` `source_dir` to automatically discover application source code from `.tf` files (code preserved in `source_tracer.rs` for re-enablement).
-2. **CloudFormation support** — Extend the same pattern to CloudFormation templates.
-3. **Terraform plan output** — Parse `terraform plan -json` for pre-apply resource bindings.
-4. **Cross-module resolution** — Follow `module` blocks to resolve resources across module boundaries.
+2. **Terraform plan output** — Parse `terraform plan -json` for pre-apply resource bindings.
+3. **Cross-module resolution** — Follow `module` blocks to resolve resources across module boundaries.
+4. **Terraform provider** - Custom terraform provider to auto analyze source code and inject policies into .tf files.
