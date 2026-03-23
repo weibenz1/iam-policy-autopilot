@@ -12,6 +12,11 @@ use serde::Deserialize;
 
 use crate::Location;
 
+/// JSON tree-sitter node kind for key-value pairs (`"key": value`).
+const JSON_PAIR: &str = "pair";
+/// JSON tree-sitter node kind for the colon separator in pairs.
+const JSON_COLON: &str = ":";
+
 /// A resource instance extracted from `terraform.tfstate`.
 ///
 /// Identity is based on `(resource_type, name, arn)` — the location is
@@ -201,7 +206,7 @@ fn find_string_location(content: &str, source_path: &Path, value: &str) -> Optio
 
     // DFS: find "pair" nodes with key "arn" whose value matches
     for node in root.dfs() {
-        if node.kind() != "pair" {
+        if node.kind() != JSON_PAIR {
             continue;
         }
         let mut children = node.children();
@@ -211,7 +216,7 @@ fn find_string_location(content: &str, source_path: &Path, value: &str) -> Optio
         }
         // Skip ":" separator, then check value
         for child in children {
-            if child.kind() != ":" && child.text().trim_matches('"') == value {
+            if child.kind() != JSON_COLON && child.text().trim_matches('"') == value {
                 return Some(Location::from_node(source_path.to_path_buf(), &child));
             }
         }
