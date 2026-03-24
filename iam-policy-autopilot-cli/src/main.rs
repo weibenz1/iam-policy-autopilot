@@ -346,7 +346,7 @@ Examples:\n  \
         )]
         explain: Option<Vec<String>>,
 
-        /// Terraform project directory for concrete resource ARN binding
+        /// Terraform project directory for resolving ARNs to use in resource block in generated policies
         #[arg(
             long = "terraform-dir",
             long_help = "Directory containing Terraform .tf files. When provided, the tool parses \
@@ -356,7 +356,7 @@ combined with any files specified via --terraform-file."
         )]
         terraform_dir: Option<PathBuf>,
 
-        /// Individual Terraform .tf files for resource ARN binding
+        /// Individual Terraform (.tf) files for resolving ARNs to use in resource block in generated policies
         #[arg(
             long = "terraform-file",
             num_args = 1..,
@@ -367,7 +367,7 @@ specified via --terraform-dir. Supports multiple file paths."
         )]
         terraform_files: Vec<PathBuf>,
 
-        /// Explicit .tfvars file(s) for variable overrides
+        /// Terraform .tfvars file(s) that's necessary for resolving resource ARNs
         #[arg(
             long = "tfvars",
             num_args = 1..,
@@ -378,7 +378,7 @@ This is equivalent to Terraform's -var-file= CLI flag."
         )]
         tfvars: Vec<PathBuf>,
 
-        /// Path to terraform.tfstate file(s) for enhanced ARN resolution
+        /// Terraform state file(s) for exact deployed ARN resolution
         #[arg(
             long = "tfstate",
             num_args = 1..,
