@@ -51,21 +51,21 @@ Customers using Infrastructure-as-Code (IaC) already declare their AWS resources
 # Existing usage (unchanged)
 iam-policy-autopilot generate-policies handler.py --region us-east-1 --account 123456789012
 
-# New: with Terraform directory (auto-discovers .tf, .tfvars, .tfstate)
+# New: with Terraform directory (auto-discovers .tf and .tfvars)
 iam-policy-autopilot generate-policies handler.py \
-    --terraform-dir ./infra \
+    --tf-dir ./infra \
     --region us-east-1 --account 123456789012
 
 # New: with individual Terraform files + explicit tfvars
 iam-policy-autopilot generate-policies handler.py \
-    --terraform-file ./infra/main.tf --terraform-file ./infra/variables.tf \
+    --tf-files ./infra/main.tf ./infra/variables.tf \
     --tfvars ./infra/terraform.tfvars \
     --region us-east-1 --account 123456789012
 
 # New: with Terraform state for exact ARNs
 iam-policy-autopilot generate-policies handler.py \
-    --terraform-dir ./infra \
-    --tfstate ./infra/terraform.tfstate \
+    --tf-dir ./infra \
+    --tfstates ./infra/terraform.tfstate \
     --region us-east-1 --account 123456789012
 ```
 

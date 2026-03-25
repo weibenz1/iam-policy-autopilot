@@ -348,44 +348,46 @@ Examples:\n  \
 
         /// Terraform project directory for resolving ARNs to use in resource block in generated policies
         #[arg(
-            long = "terraform-dir",
+            long = "tf-dir",
             long_help = "Directory containing Terraform .tf files. When provided, the tool parses \
-Terraform resources to discover AWS infrastructure and generates less permissive IAM policies with \
-concrete resource ARNs instead of wildcards. .tf files discovered in the Terraform directory are \
-combined with any files specified via --terraform-file."
+Terraform resources to discover AWS infrastructure and generates more precise IAM policies by \
+using concrete resource names in ARNs, when possible. .tf files discovered in the Terraform \
+directory are combined with any files specified via --tf-files."
         )]
         terraform_dir: Option<PathBuf>,
 
-        /// Individual Terraform (.tf) files for resolving ARNs to use in resource block in generated policies
+        /// One or more .tf file(s) for resolving ARNs to use in resource block in generated policies
         #[arg(
-            long = "terraform-file",
+            long = "tf-files",
             num_args = 1..,
             long_help = "One or more individual Terraform .tf files to parse for AWS resource definitions. \
-Use this when your Terraform files are not in a single directory, or when you want to analyze \
-specific files rather than an entire directory. These files are combined with any directory \
-specified via --terraform-dir. Supports multiple file paths."
+When provided, the tool parses Terraform resources to discover AWS infrastructure and generates \
+more precise IAM policies by using concrete resource names in ARNs, when possible. These files \
+are combined with any directory specified via --tf-dir."
         )]
         terraform_files: Vec<PathBuf>,
 
-        /// Terraform .tfvars file(s) that's necessary for resolving resource ARNs
+        /// One or more .tfvars file(s) for variable overrides
         #[arg(
             long = "tfvars",
             num_args = 1..,
-            long_help = "One or more paths to .tfvars files for Terraform variable overrides. \
-When provided, these files take precedence over auto-discovered terraform.tfvars and *.auto.tfvars \
-files from the Terraform directory. Applied in order (later files override earlier ones). \
-This is equivalent to Terraform's -var-file= CLI flag."
+            long_help = "One or more .tfvars files for overriding Terraform variable values. When \
+provided, these files are used to resolve variable references in resource definitions, enabling \
+more precise IAM policies by using concrete resource names in ARNs. These files take precedence \
+over auto-discovered terraform.tfvars and *.auto.tfvars files from the Terraform directory. \
+Applied in order (later files override earlier ones). This is equivalent to Terraform's \
+-var-file= CLI flag."
         )]
         tfvars: Vec<PathBuf>,
 
-        /// Terraform state file(s) for exact deployed ARN resolution
+        /// One or more .tfstate file(s) for resolving exact deployed ARNs to use in resource block in generated policies
         #[arg(
-            long = "tfstate",
+            long = "tfstates",
             num_args = 1..,
-            long_help = "One or more paths to terraform.tfstate files. When provided, the tool uses \
-actual deployed resource ARNs from the state files to generate less permissive IAM policies with \
-concrete resources ARNs instead of wildcards. State-derived ARNs take precedence over the ones dervied from .tf files. \
-Can be used with --terraform-dir, --terraform-file, or independently."
+            long_help = "One or more terraform.tfstate files containing deployed resource state. \
+When provided, the tool uses actual deployed resource ARNs to generate more precise IAM policies. \
+State-derived ARNs take precedence over those derived from .tf files. Can be used with --tf-dir, \
+--tf-files, or independently."
         )]
         tfstate: Vec<PathBuf>,
     },

@@ -39,10 +39,10 @@ struct TestInputs {
     region: String,
     account: String,
     individual_policies: bool,
-    terraform_dir: bool,
-    terraform_files: Vec<String>,
+    tf_dir: bool,
+    tf_files: Vec<String>,
     tfvars: Vec<String>,
-    tfstate: Vec<String>,
+    tfstates: Vec<String>,
     explain_filters: Option<Vec<String>>,
 }
 
@@ -71,13 +71,13 @@ fn build_config(fixture_dir: &Path, inputs: &TestInputs) -> GeneratePolicyConfig
         minimize_policy_size: false,
         disable_file_system_cache: false,
         explain_filters: inputs.explain_filters.clone(),
-        terraform_dir: if inputs.terraform_dir {
+        terraform_dir: if inputs.tf_dir {
             Some(fixture_dir.to_path_buf())
         } else {
             None
         },
-        terraform_files: inputs.terraform_files.iter().map(|f| resolve(f)).collect(),
-        tfstate_paths: inputs.tfstate.iter().map(|f| resolve(f)).collect(),
+        terraform_files: inputs.tf_files.iter().map(|f| resolve(f)).collect(),
+        tfstate_paths: inputs.tfstates.iter().map(|f| resolve(f)).collect(),
         tfvars_files: inputs.tfvars.iter().map(|f| resolve(f)).collect(),
     }
 }

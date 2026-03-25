@@ -9,10 +9,10 @@
       "region": "us-east-1",
       "account": "123456789012",
       "individual_policies": true,
-      "terraform_dir": true,
-      "terraform_files": [],
+      "tf_dir": true,
+      "tf_files": [],
       "tfvars": [],
-      "tfstate": [],
+      "tfstates": [],
       "explain_filters": null
     },
     "expected_output": "expected_policies.json"
@@ -27,10 +27,10 @@
       "region": "us-east-1",
       "account": "123456789012",
       "individual_policies": false,
-      "terraform_dir": true,
-      "terraform_files": [],
+      "tf_dir": true,
+      "tf_files": [],
       "tfvars": [],
-      "tfstate": [],
+      "tfstates": [],
       "explain_filters": null
     },
     "expected_output": "expected_merged_policy.json"
@@ -45,15 +45,15 @@
       "region": "us-east-1",
       "account": "123456789012",
       "individual_policies": true,
-      "terraform_dir": false,
-      "terraform_files": [
+      "tf_dir": false,
+      "tf_files": [
         "main.tf",
         "variables.tf"
       ],
       "tfvars": [
         "terraform.tfvars"
       ],
-      "tfstate": [],
+      "tfstates": [],
       "explain_filters": null
     },
     "expected_output": "expected_policies.json"
@@ -68,10 +68,10 @@
       "region": "us-east-1",
       "account": "123456789012",
       "individual_policies": false,
-      "terraform_dir": true,
-      "terraform_files": [],
+      "tf_dir": true,
+      "tf_files": [],
       "tfvars": [],
-      "tfstate": [],
+      "tfstates": [],
       "explain_filters": [
         "*"
       ]
