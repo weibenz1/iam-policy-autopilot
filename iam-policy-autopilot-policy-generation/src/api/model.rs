@@ -40,6 +40,11 @@ pub struct GeneratePolicyConfig {
     /// When provided, these take precedence over auto-discovered `.tfvars` files
     /// from the terraform directory. Applied in order (later files override earlier).
     pub tfvars_files: Vec<PathBuf>,
+    /// Optional ARN patterns to filter resource binding explanations.
+    /// - `None`: No resource binding explanations generated
+    /// - `Some(patterns)`: Generate explanations for resources matching the patterns
+    ///   (supports wildcards like "arn:aws:s3:::*", "*" for all)
+    pub explain_resource_filters: Option<Vec<String>>,
 }
 
 /// Result of policy generation including policies, action mappings, and explanations

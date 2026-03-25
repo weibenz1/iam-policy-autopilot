@@ -43,7 +43,7 @@ struct TestInputs {
     tf_files: Vec<String>,
     tfvars: Vec<String>,
     tfstates: Vec<String>,
-    explain_filters: Option<Vec<String>>,
+    explain_resource_filters: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ fn build_config(fixture_dir: &Path, inputs: &TestInputs) -> GeneratePolicyConfig
         individual_policies: inputs.individual_policies,
         minimize_policy_size: false,
         disable_file_system_cache: false,
-        explain_filters: inputs.explain_filters.clone(),
+        explain_filters: None,
         terraform_dir: if inputs.tf_dir {
             Some(fixture_dir.to_path_buf())
         } else {
@@ -79,6 +79,7 @@ fn build_config(fixture_dir: &Path, inputs: &TestInputs) -> GeneratePolicyConfig
         terraform_files: inputs.tf_files.iter().map(|f| resolve(f)).collect(),
         tfstate_paths: inputs.tfstates.iter().map(|f| resolve(f)).collect(),
         tfvars_files: inputs.tfvars.iter().map(|f| resolve(f)).collect(),
+        explain_resource_filters: inputs.explain_resource_filters.clone(),
     }
 }
 

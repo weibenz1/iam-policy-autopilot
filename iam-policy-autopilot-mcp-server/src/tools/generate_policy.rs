@@ -32,24 +32,24 @@ pub struct GeneratePoliciesInput {
     pub service_hints: Option<Vec<String>>,
 
     #[schemars(
-        description = "Absolute path to a Terraform project directory containing .tf files. When provided, the tool parses Terraform resources to discover AWS infrastructure and generates IAM policies with concrete resource ARNs instead of wildcards."
+        description = "Absolute path to a Terraform project directory containing .tf files. When provided, the tool parses Terraform resources to discover AWS infrastructure and generates more precise IAM policies by using concrete resource names in ARNs."
     )]
-    pub terraform_dir: Option<String>,
+    pub tf_dir: Option<String>,
 
     #[schemars(
-        description = "Absolute paths to individual Terraform .tf files. Use this when your Terraform files are not in a single directory. These files are combined with any directory specified via terraform_dir."
+        description = "Absolute paths to individual Terraform .tf files. When provided, the tool parses Terraform resources and generates more precise IAM policies. These files are combined with any directory specified via tf_dir."
     )]
-    pub terraform_files: Option<Vec<String>>,
+    pub tf_files: Option<Vec<String>>,
 
     #[schemars(
-        description = "Absolute paths to terraform.tfstate files for enhanced ARN resolution. When provided, the tool uses actual deployed resource ARNs from the state files. State-derived ARNs take precedence over HCL-constructed ones. Can be used with terraform_dir, terraform_files, or independently."
+        description = "Absolute paths to terraform.tfstate files containing deployed resource state. When provided, the tool uses actual deployed resource ARNs for more precise IAM policies. State-derived ARNs take precedence over those derived from .tf files."
     )]
-    pub tfstate_paths: Option<Vec<String>>,
+    pub tfstates: Option<Vec<String>>,
 
     #[schemars(
-        description = "Absolute paths to .tfvars files for Terraform variable overrides. When provided, these take precedence over auto-discovered .tfvars files from the terraform directory. Applied in order (later files override earlier). Equivalent to Terraform's -var-file= flag."
+        description = "Absolute paths to .tfvars files for overriding Terraform variable values. These take precedence over auto-discovered .tfvars files from the terraform directory. Applied in order (later files override earlier). Equivalent to Terraform's -var-file= flag."
     )]
-    pub tfvars_files: Option<Vec<String>>,
+    pub tfvars: Option<Vec<String>>,
 }
 
 // Output struct for the generated IAM policy
@@ -92,25 +92,26 @@ pub async fn generate_application_policies(
         disable_file_system_cache: true,
         // No explanations for MCP server by default
         explain_filters: None,
-        terraform_dir: input.terraform_dir.map(std::path::PathBuf::from),
+        terraform_dir: input.tf_dir.map(std::path::PathBuf::from),
         terraform_files: input
-            .terraform_files
+            .tf_files
             .unwrap_or_default()
             .into_iter()
             .map(std::path::PathBuf::from)
             .collect(),
         tfstate_paths: input
-            .tfstate_paths
+            .tfstates
             .unwrap_or_default()
             .into_iter()
             .map(std::path::PathBuf::from)
             .collect(),
         tfvars_files: input
-            .tfvars_files
+            .tfvars
             .unwrap_or_default()
             .into_iter()
             .map(std::path::PathBuf::from)
             .collect(),
+        explain_resource_filters: None,
     })
     .await?;
 
@@ -174,10 +175,10 @@ mod tests {
             region: Some("us-east-1".to_string()),
             account: Some("123456789012".to_string()),
             service_hints: None,
-            terraform_dir: None,
-            terraform_files: None,
-            tfstate_paths: None,
-            tfvars_files: None,
+            tf_dir: None,
+            tf_files: None,
+            tfstates: None,
+            tfvars: None,
         };
 
         let expected_output = include_str!("../testdata/test_generate_application_policy");
@@ -219,10 +220,10 @@ mod tests {
             region: Some("us-east-1".to_string()),
             account: Some("123456789012".to_string()),
             service_hints: None,
-            terraform_dir: None,
-            terraform_files: None,
-            tfstate_paths: None,
-            tfvars_files: None,
+            tf_dir: None,
+            tf_files: None,
+            tfstates: None,
+            tfvars: None,
         };
 
         api::set_mock_return(Err(anyhow!("Failed to generate policies")));
@@ -238,10 +239,10 @@ mod tests {
             region: Some("us-west-2".to_string()),
             account: Some("987654321098".to_string()),
             service_hints: None,
-            terraform_dir: None,
-            terraform_files: None,
-            tfstate_paths: None,
-            tfvars_files: None,
+            tf_dir: None,
+            tf_files: None,
+            tfstates: None,
+            tfvars: None,
         };
 
         let json = serde_json::to_string(&input).unwrap();
@@ -273,10 +274,10 @@ mod tests {
             region: Some("us-east-1".to_string()),
             account: Some("123456789012".to_string()),
             service_hints: Some(vec!["s3".to_string(), "dynamodb".to_string()]),
-            terraform_dir: None,
-            terraform_files: None,
-            tfstate_paths: None,
-            tfvars_files: None,
+            tf_dir: None,
+            tf_files: None,
+            tfstates: None,
+            tfvars: None,
         };
 
         let expected_output = include_str!("../testdata/test_generate_application_policy");

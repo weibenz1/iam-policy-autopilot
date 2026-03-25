@@ -13,7 +13,7 @@
       "tf_files": [],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": null
+      "explain_resource_filters": null
     },
     "expected_output": "expected_policies.json"
   },
@@ -31,7 +31,7 @@
       "tf_files": [],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": null
+      "explain_resource_filters": null
     },
     "expected_output": "expected_merged_policy.json"
   },
@@ -56,7 +56,7 @@
         "prod.auto.tfvars"
       ],
       "tfstates": [],
-      "explain_filters": null
+      "explain_resource_filters": null
     },
     "expected_output": "expected_policies.json"
   },
@@ -74,7 +74,7 @@
       "tf_files": [],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": [
+      "explain_resource_filters": [
         "*"
       ]
     },

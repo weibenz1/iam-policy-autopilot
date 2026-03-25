@@ -11,7 +11,8 @@ use crate::{
         model::{GeneratePoliciesResult, GeneratePolicyConfig},
     },
     enrichment::{
-        terraform::resource_binder::TerraformResourceResolver, Explanation, Explanations,
+        terraform::{resource_binder::TerraformResourceResolver, ResourceBindingExplanation},
+        Explanation, Explanations,
     },
     extraction::SdkMethodCall,
     policy_generation::merge::PolicyMergerConfig,
@@ -92,6 +93,53 @@ fn action_matches_pattern(action: &str, pattern: &str) -> bool {
     }
 
     true
+}
+
+/// Check if an ARN matches a glob pattern (supports `*` wildcards).
+fn arn_matches_pattern(arn: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    // Split pattern by `*` and check if ARN contains all parts in order
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            // First part must be a prefix
+            if !arn[pos..].starts_with(part) {
+                return false;
+            }
+            pos += part.len();
+        } else if let Some(found) = arn[pos..].find(part) {
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+    // If pattern ends with *, any suffix is ok; otherwise must match to end
+    pattern.ends_with('*') || pos == arn.len()
+}
+
+/// Filter resource binding explanations by ARN patterns.
+///
+/// Returns `None` when `filters` is `None` (no `--explain-resources` provided).
+/// When filters are present, only explanations with ARNs matching at least one
+/// pattern are retained.
+fn filter_resource_explanations(
+    explanations: Vec<ResourceBindingExplanation>,
+    filters: &[String],
+) -> Vec<ResourceBindingExplanation> {
+    explanations
+        .into_iter()
+        .filter(|e| {
+            filters
+                .iter()
+                .any(|pattern| arn_matches_pattern(&e.arn, pattern))
+        })
+        .collect()
 }
 
 /// Filter explanations to only include actions matching the given patterns.
@@ -230,14 +278,20 @@ pub async fn generate_policies(config: &GeneratePolicyConfig) -> Result<Generate
     trace!("Enrichment pipeline completed in {enrichment_duration:?}");
 
     // --- Optional Terraform ARN substitution ---
-    // ARN substitution always happens when terraform_dir is set.
-    // Binding explanations are only included when --explain is also provided.
+    // ARN substitution always happens when terraform inputs are present.
+    // Binding explanations are only included when --explain-resources is provided,
+    // and filtered by the ARN patterns.
     let (final_enriched, binding_explanations) = if let Some(ref resolver) = terraform_resolver {
         let bound = resolver.substitute_enriched_calls(&enriched_results);
-        let explanations = if config.explain_filters.is_some() {
-            let expl = resolver.build_binding_explanations();
-            debug!("Terraform binding: {} binding explanations", expl.len());
-            Some(expl)
+        let explanations = if let Some(ref filters) = config.explain_resource_filters {
+            let all_expl = resolver.build_binding_explanations();
+            let total = all_expl.len();
+            let filtered = filter_resource_explanations(all_expl, filters);
+            debug!(
+                "Terraform binding: {} binding explanations (filtered from {total})",
+                filtered.len()
+            );
+            Some(filtered)
         } else {
             None
         };
@@ -299,6 +353,7 @@ pub async fn generate_policies(config: &GeneratePolicyConfig) -> Result<Generate
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn test_action_matches_pattern_exact_match() {
@@ -422,5 +477,122 @@ mod tests {
     fn test_filter_explanations_none_input() {
         let result = filter_explanations(None, &["s3:*".to_string()]);
         assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // arn_matches_pattern tests
+    // -----------------------------------------------------------------------
+
+    #[rstest]
+    #[case("wildcard_all", "arn:aws:s3:::my-bucket", "*", true)]
+    #[case(
+        "exact_match",
+        "arn:aws:s3:::my-bucket",
+        "arn:aws:s3:::my-bucket",
+        true
+    )]
+    #[case("prefix_wildcard", "arn:aws:s3:::my-bucket", "arn:aws:s3:::*", true)]
+    #[case(
+        "service_wildcard",
+        "arn:aws:dynamodb:us-east-1:123:table/t",
+        "arn:*:dynamodb:*",
+        true
+    )]
+    #[case("no_match", "arn:aws:s3:::my-bucket", "arn:aws:dynamodb:*", false)]
+    #[case(
+        "partial_no_match",
+        "arn:aws:s3:::my-bucket",
+        "arn:aws:s3:::other-*",
+        false
+    )]
+    #[case(
+        "exact_no_match",
+        "arn:aws:s3:::my-bucket",
+        "arn:aws:s3:::my-bucke",
+        false
+    )]
+    #[case(
+        "middle_wildcard",
+        "arn:aws:s3:::my-bucket/key.txt",
+        "arn:aws:s3:::*/key.txt",
+        true
+    )]
+    #[case(
+        "partition_wildcard",
+        "arn:${Partition}:s3:::my-bucket",
+        "arn:*:s3:::*",
+        true
+    )]
+    fn test_arn_matches_pattern(
+        #[case] _name: &str,
+        #[case] arn: &str,
+        #[case] pattern: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            arn_matches_pattern(arn, pattern),
+            expected,
+            "[{_name}] arn={arn}, pattern={pattern}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // filter_resource_explanations tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build test explanations with the given ARNs.
+    #[cfg(test)]
+    fn make_explanations(arns: &[&str]) -> Vec<ResourceBindingExplanation> {
+        arns.iter()
+            .map(|arn| ResourceBindingExplanation {
+                arn: arn.to_string(),
+                source: crate::enrichment::terraform::BindingSource::Terraform,
+                resource_type: "aws_test".to_string(),
+                resource_name: "test".to_string(),
+                location: crate::Location::new(std::path::PathBuf::from("main.tf"), (1, 1), (1, 1)),
+            })
+            .collect()
+    }
+
+    #[rstest]
+    // Wildcard matches all
+    #[case(
+        "all",
+        &["arn:aws:s3:::bucket-a", "arn:aws:dynamodb:us-east-1:123:table/t"],
+        &["*"],
+        &["arn:aws:s3:::bucket-a", "arn:aws:dynamodb:us-east-1:123:table/t"]
+    )]
+    // Filter by S3 service
+    #[case(
+        "s3_only",
+        &["arn:aws:s3:::bucket-a", "arn:aws:dynamodb:us-east-1:123:table/t"],
+        &["arn:aws:s3:::*"],
+        &["arn:aws:s3:::bucket-a"]
+    )]
+    // No matches
+    #[case(
+        "no_match",
+        &["arn:aws:s3:::bucket-a"],
+        &["arn:aws:lambda:*"],
+        &[]
+    )]
+    // Multiple filters
+    #[case(
+        "multi_filter",
+        &["arn:aws:s3:::b", "arn:aws:dynamodb:us-east-1:123:table/t", "arn:aws:sqs:us-east-1:123:q"],
+        &["arn:aws:s3:::*", "arn:aws:sqs:*"],
+        &["arn:aws:s3:::b", "arn:aws:sqs:us-east-1:123:q"]
+    )]
+    fn test_filter_resource_explanations(
+        #[case] _name: &str,
+        #[case] arns: &[&str],
+        #[case] filters: &[&str],
+        #[case] expected_arns: &[&str],
+    ) {
+        let explanations = make_explanations(arns);
+        let filter_strings: Vec<String> = filters.iter().map(|s| s.to_string()).collect();
+        let result = filter_resource_explanations(explanations, &filter_strings);
+        let result_arns: Vec<&str> = result.iter().map(|e| e.arn.as_str()).collect();
+        assert_eq!(result_arns, expected_arns, "[{_name}] ARN list mismatch");
     }
 }

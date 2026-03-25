@@ -34,8 +34,9 @@ Customers using Infrastructure-as-Code (IaC) already declare their AWS resources
 
 1. **Concrete resource ARNs** — Replace `${BucketName}`, `${TableName}`, etc. in generated ARN patterns with values extracted from Terraform configuration.
 2. **State file support** — Optionally use `terraform.tfstate` for exact deployed ARNs (including account, region, partition) when available.
-3. **Unified CLI** — Integrate Terraform support as optional flags (`--terraform-dir`, `--terraform-file`, `--tfvars`, `--tfstate`) on the existing `generate-policies` command rather than a separate subcommand.
-4. **Non-disruptive** — When `--terraform-dir` is not provided, behavior is identical to the existing pipeline.
+3. **Unified CLI** — Integrate Terraform support as optional flags (`--tf-dir`, `--tf-files`, `--tfvars`, `--tfstates`) on the existing `generate-policies` command rather than a separate subcommand.
+4. **Resource binding explanations** — `--explain-resources` with ARN glob patterns shows where each concrete resource ARN came from.
+5. **Non-disruptive** — When no Terraform flags are provided, behavior is identical to the existing pipeline.
 
 ### Non-Goals
 
@@ -71,7 +72,7 @@ iam-policy-autopilot generate-policies handler.py \
 
 ### Output
 
-When Terraform bindings are active, the output includes a `ResourceBindingExplanations` section documenting where each concrete ARN came from:
+When `--explain-resources` is provided with ARN glob patterns, the output includes a `ResourceBindingExplanations` section documenting where each matching concrete ARN came from:
 
 ```json
 {

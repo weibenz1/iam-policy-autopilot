@@ -2,9 +2,7 @@
   {
     "name": "dir_individual_policies",
     "inputs": {
-      "source_files": [
-        "app.py"
-      ],
+      "source_files": ["app.py"],
       "language": "python",
       "region": "us-east-1",
       "account": "123456789012",
@@ -13,16 +11,14 @@
       "tf_files": [],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": null
+      "explain_resource_filters": null
     },
     "expected_output": "expected_policies.json"
   },
   {
     "name": "dir_merged_policy",
     "inputs": {
-      "source_files": [
-        "app.py"
-      ],
+      "source_files": ["app.py"],
       "language": "python",
       "region": "us-east-1",
       "account": "123456789012",
@@ -31,36 +27,30 @@
       "tf_files": [],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": null
+      "explain_resource_filters": null
     },
     "expected_output": "expected_merged_policy.json"
   },
   {
     "name": "files_individual_policies",
     "inputs": {
-      "source_files": [
-        "app.py"
-      ],
+      "source_files": ["app.py"],
       "language": "python",
       "region": "us-east-1",
       "account": "123456789012",
       "individual_policies": true,
       "tf_dir": false,
-      "tf_files": [
-        "main.tf"
-      ],
+      "tf_files": ["main.tf"],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": null
+      "explain_resource_filters": null
     },
     "expected_output": "expected_policies.json"
   },
   {
     "name": "dir_with_explanations",
     "inputs": {
-      "source_files": [
-        "app.py"
-      ],
+      "source_files": ["app.py"],
       "language": "python",
       "region": "us-east-1",
       "account": "123456789012",
@@ -69,9 +59,7 @@
       "tf_files": [],
       "tfvars": [],
       "tfstates": [],
-      "explain_filters": [
-        "*"
-      ]
+      "explain_resource_filters": ["*"]
     },
     "expected_output": "expected_with_explanations.json"
   }

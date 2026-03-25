@@ -100,6 +100,8 @@ struct GeneratePolicyCliConfig {
     tfstate: Vec<PathBuf>,
     /// Optional explicit .tfvars file paths
     tfvars: Vec<PathBuf>,
+    /// Optional ARN patterns to filter resource binding explanations
+    explain_resources: Option<Vec<String>>,
 }
 
 impl GeneratePolicyCliConfig {
@@ -141,6 +143,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Fix AccessDenied errors by analyzing and optionally applying IAM policy changes
     #[command(
@@ -390,6 +393,23 @@ State-derived ARNs take precedence over those derived from .tf files. Can be use
 --tf-files, or independently."
         )]
         tfstate: Vec<PathBuf>,
+
+        /// Generate explanations for why resource ARNs were added, filtered to specificed patterns
+        #[arg(
+            long = "explain-resources",
+            num_args = 1..,
+            long_help = "Show where concrete resource ARNs in the generated policy came from \
+(Terraform source file, state file, etc.). Accepts one or more ARN glob patterns to filter which \
+resources are explained. Only works when Terraform inputs (--tf-dir, --tf-files, or --tfstates) \
+are also provided.\n\n\
+Examples:\n  \
+--explain-resources '*'                                                        # Explain all resource ARNs\n  \
+--explain-resources 'arn:aws:s3:::*'                                           # Explain only S3 bucket ARNs\n  \
+--explain-resources 'arn:*:dynamodb:*'                                         # Explain only DynamoDB ARNs\n  \
+--explain-resources 'arn:aws:s3:::*' 'arn:aws:sqs:*'                           # Explain S3 and SQS ARNs\n \
+--explain-resources 'arn:aws:dynamodb:us-east-1:123456789012:table/users-prod' # Explain specific resource ARNs"
+        )]
+        explain_resources: Option<Vec<String>>,
     },
 
     /// Start MCP server
@@ -520,6 +540,7 @@ async fn handle_generate_policy(config: &GeneratePolicyCliConfig) -> Result<()> 
         terraform_files: config.terraform_files.clone(),
         tfstate_paths: config.tfstate.clone(),
         tfvars_files: config.tfvars.clone(),
+        explain_resource_filters: config.explain_resources.clone(),
     })
     .await?;
 
@@ -646,6 +667,7 @@ async fn main() {
             terraform_files,
             tfstate,
             tfvars,
+            explain_resources,
         } => {
             // Initialize logging
             if let Err(e) = init_logging(debug) {
@@ -672,6 +694,7 @@ async fn main() {
                 terraform_files,
                 tfstate,
                 tfvars,
+                explain_resources,
             };
 
             match handle_generate_policy(&config).await {
