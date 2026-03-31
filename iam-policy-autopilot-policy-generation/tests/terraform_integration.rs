@@ -42,7 +42,7 @@ struct TestInputs {
     tf_dir: bool,
     tf_files: Vec<String>,
     tfvars: Vec<String>,
-    tfstates: Vec<String>,
+    tfstate: Vec<String>,
     explain_resource_filters: Option<Vec<String>>,
 }
 
@@ -77,7 +77,7 @@ fn build_config(fixture_dir: &Path, inputs: &TestInputs) -> GeneratePolicyConfig
             None
         },
         terraform_files: inputs.tf_files.iter().map(|f| resolve(f)).collect(),
-        tfstate_paths: inputs.tfstates.iter().map(|f| resolve(f)).collect(),
+        tfstate_paths: inputs.tfstate.iter().map(|f| resolve(f)).collect(),
         tfvars_files: inputs.tfvars.iter().map(|f| resolve(f)).collect(),
         explain_resource_filters: inputs.explain_resource_filters.clone(),
     }

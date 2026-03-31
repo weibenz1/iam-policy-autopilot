@@ -385,7 +385,7 @@ Applied in order (later files override earlier ones). This is equivalent to Terr
 
         /// One or more .tfstate file(s) for resolving exact deployed ARNs to use in resource block in generated policies
         #[arg(
-            long = "tfstates",
+            long = "tfstate",
             num_args = 1..,
             long_help = "One or more terraform.tfstate files containing deployed resource state. \
 When provided, the tool uses actual deployed resource ARNs to generate more precise IAM policies. \
@@ -400,7 +400,7 @@ State-derived ARNs take precedence over those derived from .tf files. Can be use
             num_args = 1..,
             long_help = "Show where concrete resource ARNs in the generated policy came from \
 (Terraform source file, state file, etc.). Accepts one or more ARN glob patterns to filter which \
-resources are explained. Only works when Terraform inputs (--tf-dir, --tf-files, or --tfstates) \
+resources are explained. Only works when Terraform inputs (--tf-dir, --tf-files, or --tfstate) \
 are also provided.\n\n\
 Examples:\n  \
 --explain-resources '*'                                                        # Explain all resource ARNs\n  \

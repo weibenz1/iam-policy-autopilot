@@ -44,7 +44,7 @@ pub struct GeneratePoliciesInput {
     #[schemars(
         description = "Absolute paths to terraform.tfstate files containing deployed resource state. When provided, the tool uses actual deployed resource ARNs for more precise IAM policies. State-derived ARNs take precedence over those derived from .tf files."
     )]
-    pub tfstates: Option<Vec<String>>,
+    pub tfstate: Option<Vec<String>>,
 
     #[schemars(
         description = "Absolute paths to .tfvars files for overriding Terraform variable values. These take precedence over auto-discovered .tfvars files from the terraform directory. Applied in order (later files override earlier). Equivalent to Terraform's -var-file= flag."
@@ -100,7 +100,7 @@ pub async fn generate_application_policies(
             .map(std::path::PathBuf::from)
             .collect(),
         tfstate_paths: input
-            .tfstates
+            .tfstate
             .unwrap_or_default()
             .into_iter()
             .map(std::path::PathBuf::from)
@@ -177,7 +177,7 @@ mod tests {
             service_hints: None,
             tf_dir: None,
             tf_files: None,
-            tfstates: None,
+            tfstate: None,
             tfvars: None,
         };
 
@@ -222,7 +222,7 @@ mod tests {
             service_hints: None,
             tf_dir: None,
             tf_files: None,
-            tfstates: None,
+            tfstate: None,
             tfvars: None,
         };
 
@@ -241,7 +241,7 @@ mod tests {
             service_hints: None,
             tf_dir: None,
             tf_files: None,
-            tfstates: None,
+            tfstate: None,
             tfvars: None,
         };
 
@@ -276,7 +276,7 @@ mod tests {
             service_hints: Some(vec!["s3".to_string(), "dynamodb".to_string()]),
             tf_dir: None,
             tf_files: None,
-            tfstates: None,
+            tfstate: None,
             tfvars: None,
         };
 
