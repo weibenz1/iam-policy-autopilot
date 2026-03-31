@@ -452,7 +452,7 @@ fn enum_telemetry_fields_includes_all_non_skip_variants() {
         .iter()
         .find(|f| f.field_name == "pretty")
         .expect("pretty should be in metadata");
-    assert_eq!(pretty_field.collection_mode, "actual value");
+    assert_eq!(pretty_field.collection_mode, "actual value (boolean)");
 
     // Check value_if_present
     let region_field = generate_fields

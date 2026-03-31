@@ -31,12 +31,12 @@ pub use event::TelemetryEvent;
 // Re-export the derive macro so users can write:
 //   use iam_policy_autopilot_common::telemetry::TelemetryEvent;  (the struct)
 //   use iam_policy_autopilot_common::telemetry::TelemetryEventDerive;  (the macro)
-pub use iam_policy_autopilot_telemetry_derive::TelemetryEvent as TelemetryEventDerive;
+pub use iam_policy_autopilot_proc_macros::TelemetryEvent as TelemetryEventDerive;
 
 /// Trait for types that can be converted to a [`TelemetryEvent`].
 ///
 /// This is automatically implemented by `#[derive(TelemetryEvent)]` from
-/// `iam-policy-autopilot-telemetry-derive`.
+/// `iam-policy-autopilot-proc-macros`.
 pub trait ToTelemetryEvent {
     /// Convert this value into an optional telemetry event.
     ///

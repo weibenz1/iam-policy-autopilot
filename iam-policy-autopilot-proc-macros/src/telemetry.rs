@@ -54,15 +54,14 @@
 
 use std::fmt;
 
-use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Expr, Fields, Lit, Meta};
+use syn::{Data, DeriveInput, Expr, Fields, Lit, Meta};
 
-/// Derive macro for generating `ToTelemetryEvent` implementations.
-#[proc_macro_derive(TelemetryEvent, attributes(telemetry))]
-pub fn derive_telemetry_event(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-
+/// Implementation of the `TelemetryEvent` derive macro.
+///
+/// Called from `lib.rs` (the proc-macro entry point). Accepts a parsed `DeriveInput`
+/// and returns either the generated `impl` token stream or a compile error.
+pub(crate) fn derive_telemetry_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
     let result = match &input.data {
         Data::Enum(data_enum) => derive_for_enum(&input, data_enum),
         Data::Struct(data_struct) => derive_for_struct(&input, data_struct),
@@ -74,7 +73,7 @@ pub fn derive_telemetry_event(input: TokenStream) -> TokenStream {
 
     match result {
         Ok(tokens) => tokens,
-        Err(err) => err.to_compile_error().into(),
+        Err(err) => err.to_compile_error(),
     }
 }
 
@@ -121,8 +120,8 @@ enum FieldMode {
     List,
 }
 
-/// Human-readable description of each `FieldMode`, used to populate
-/// [`TelemetryFieldInfo::collection_mode`] for auto-generated documentation tables.
+/// Human-readable description of each `FieldMode` without type information.
+/// Used for debug output and test assertions.
 impl fmt::Display for FieldMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -134,6 +133,48 @@ impl fmt::Display for FieldMode {
             FieldMode::List => write!(f, "list of values if non-empty, omitted otherwise"),
         }
     }
+}
+
+/// Produce a human-readable collection mode description that includes the value type
+/// for `FieldMode::Value`. Used to populate [`TelemetryFieldInfo::collection_mode`]
+/// in the auto-generated documentation tables.
+///
+/// Examples:
+/// - `Value` + `bool` → `"actual value (boolean)"`
+/// - `Value` + `String` → `"actual value (string)"`
+/// - `Value` + `u32` → `"actual value (u32)"`
+/// - `Presence` → `"presence (boolean)"` (type not relevant)
+fn collection_mode_description(mode: &FieldMode, field_type: &syn::Type) -> String {
+    match mode {
+        FieldMode::Value => {
+            let type_label = friendly_type_name(field_type);
+            format!("actual value ({type_label})")
+        }
+        // All other modes have fixed descriptions independent of the field type
+        other => other.to_string(),
+    }
+}
+
+/// Convert a `syn::Type` to a short human-readable label for documentation.
+///
+/// Recognizes common types like `bool`, `String`, `usize`, and falls back to
+/// the raw type token string for anything else.
+fn friendly_type_name(ty: &syn::Type) -> String {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(ident) = type_path.path.get_ident() {
+            let name = ident.to_string();
+            return match name.as_str() {
+                "bool" => "boolean".to_string(),
+                "String" => "string".to_string(),
+                "usize" | "u8" | "u16" | "u32" | "u64" | "u128"
+                | "isize" | "i8" | "i16" | "i32" | "i64" | "i128" => name,
+                "f32" | "f64" => name,
+                _ => name,
+            };
+        }
+    }
+    // For complex types (generics, references, etc.), use the token representation
+    quote::quote!(#ty).to_string()
 }
 
 /// Extract the identifier name from a `syn::Meta` item, regardless of variant.
@@ -234,6 +275,8 @@ fn parse_field_mode(attrs: &[syn::Attribute]) -> syn::Result<FieldMode> {
             syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
         )?;
 
+        // Phase 1: Collect all recognized flags from the comma-separated attribute list.
+        // e.g., `#[telemetry(value, if_present)]` sets `has_value = true` and `has_if_present = true`.
         let mut has_skip = false;
         let mut has_value = false;
         let mut has_presence = false;
@@ -242,13 +285,16 @@ fn parse_field_mode(attrs: &[syn::Attribute]) -> syn::Result<FieldMode> {
         let mut default_val: Option<String> = None;
 
         for meta in &nested {
+            // Extract the keyword name for error reporting on unrecognized attributes
             let name = meta_ident_name(meta);
             match meta {
+                // Bare keywords: `skip`, `value`, `presence`, `if_present`, `list`
                 Meta::Path(path) if path.is_ident("skip") => has_skip = true,
                 Meta::Path(path) if path.is_ident("value") => has_value = true,
                 Meta::Path(path) if path.is_ident("presence") => has_presence = true,
                 Meta::Path(path) if path.is_ident("if_present") => has_if_present = true,
                 Meta::Path(path) if path.is_ident("list") => has_list = true,
+                // Key-value: `default = "some_string"` — only valid with `presence`
                 Meta::NameValue(nv) if nv.path.is_ident("default") => {
                     if let Expr::Lit(expr_lit) = &nv.value {
                         if let Lit::Str(lit_str) = &expr_lit.lit {
@@ -256,6 +302,7 @@ fn parse_field_mode(attrs: &[syn::Attribute]) -> syn::Result<FieldMode> {
                         }
                     }
                 }
+                // Catch-all: reject unknown keywords with a helpful compile error
                 _ => {
                     if let Some(name) = name {
                         if !KNOWN_FIELD_ATTRS.contains(&name.as_str()) {
@@ -273,6 +320,9 @@ fn parse_field_mode(attrs: &[syn::Attribute]) -> syn::Result<FieldMode> {
             }
         }
 
+        // Phase 2: Resolve the collected flags into a single FieldMode.
+        // Priority order ensures deterministic behavior when multiple flags are present:
+        //   skip > list > (value + if_present) > value > presence
         if has_skip {
             return Ok(FieldMode::Skip);
         }
@@ -392,7 +442,7 @@ fn wildcard_pattern(
 fn derive_for_enum(
     input: &DeriveInput,
     data_enum: &syn::DataEnum,
-) -> syn::Result<TokenStream> {
+) -> syn::Result<proc_macro2::TokenStream> {
     let enum_name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
@@ -422,14 +472,14 @@ fn derive_for_enum(
         // --- telemetry_fields entries ---
         if let Fields::Named(fields_named) = &variant.fields {
             for field in &fields_named.named {
-                let name = field.ident.as_ref().expect("named field").to_string();
+                let field_name_str = field.ident.as_ref().expect("named field").to_string();
                 let mode = parse_field_mode(&field.attrs)?;
-                let mode_str = mode.to_string();
+                let mode_description = collection_mode_description(&mode, &field.ty);
                 field_info_entries.push(quote! {
                     iam_policy_autopilot_common::telemetry::TelemetryFieldInfo {
                         command: #command_name.to_string(),
-                        field_name: #name.to_string(),
-                        collection_mode: #mode_str.to_string(),
+                        field_name: #field_name_str.to_string(),
+                        collection_mode: #mode_description.to_string(),
                     }
                 });
             }
@@ -437,26 +487,26 @@ fn derive_for_enum(
 
         // --- to_telemetry_event arm for non-skip variant ---
         if let Fields::Named(fields_named) = &variant.fields {
-            let mut captured_names = Vec::new();
-            let mut field_code = Vec::new();
+            let mut ref_bindings = Vec::new();
+            let mut field_recording_code = Vec::new();
 
             for field in &fields_named.named {
-                let name = field.ident.as_ref().expect("named field");
+                let field_ident = field.ident.as_ref().expect("named field");
                 let mode = parse_field_mode(&field.attrs)?;
 
-                let accessor = quote! { #name };
-                let deref_accessor = quote! { *#name };
+                let accessor = quote! { #field_ident };
+                let deref_accessor = quote! { *#field_ident };
                 // Enum fields are bound with `ref`, so they're already references
-                let ref_accessor = quote! { #name };
+                let ref_accessor = quote! { #field_ident };
                 if let Some(code) =
-                    generate_field_code(&accessor, &deref_accessor, &ref_accessor, &name.to_string(), &field.ty, &mode)
+                    generate_field_code(&accessor, &deref_accessor, &ref_accessor, &field_ident.to_string(), &field.ty, &mode)
                 {
-                    captured_names.push(quote! { ref #name });
-                    field_code.push(code);
+                    ref_bindings.push(quote! { ref #field_ident });
+                    field_recording_code.push(code);
                 }
             }
 
-            if field_code.is_empty() {
+            if field_recording_code.is_empty() {
                 variant_arms.push(quote! {
                     #enum_name::#variant_name { .. } => {
                         Some(iam_policy_autopilot_common::telemetry::TelemetryEvent::new(#command_name))
@@ -464,9 +514,9 @@ fn derive_for_enum(
                 });
             } else {
                 variant_arms.push(quote! {
-                    #enum_name::#variant_name { #(#captured_names,)* .. } => {
+                    #enum_name::#variant_name { #(#ref_bindings,)* .. } => {
                         let mut event = iam_policy_autopilot_common::telemetry::TelemetryEvent::new(#command_name);
-                        #(#field_code)*
+                        #(#field_recording_code)*
                         Some(event)
                     }
                 });
@@ -507,7 +557,7 @@ fn derive_for_enum(
         }
     };
 
-    Ok(expanded.into())
+    Ok(expanded)
 }
 
 // --- Code generation: structs ---
@@ -524,7 +574,7 @@ fn derive_for_enum(
 fn derive_for_struct(
     input: &DeriveInput,
     data_struct: &syn::DataStruct,
-) -> syn::Result<TokenStream> {
+) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let container_attrs = parse_container_attrs(&input.attrs)?;
@@ -535,34 +585,34 @@ fn derive_for_struct(
 
     let skip_notice = container_attrs.skip || container_attrs.skip_notice;
 
-    let mut field_code = Vec::new();
-    let mut struct_field_info = Vec::new();
+    let mut field_recording_code = Vec::new();
+    let mut field_info_entries = Vec::new();
 
     if let Fields::Named(fields_named) = &data_struct.fields {
         for field in &fields_named.named {
-            let field_name = field.ident.as_ref().expect("named field");
-            let name_str = field_name.to_string();
+            let field_ident = field.ident.as_ref().expect("named field");
+            let field_name_str = field_ident.to_string();
             let mode = parse_field_mode(&field.attrs)?;
-            let mode_str = mode.to_string();
+            let mode_description = collection_mode_description(&mode, &field.ty);
 
             // Collect field info for telemetry_fields()
-            struct_field_info.push(quote! {
+            field_info_entries.push(quote! {
                 iam_policy_autopilot_common::telemetry::TelemetryFieldInfo {
                     command: #command_name.to_string(),
-                    field_name: #name_str.to_string(),
-                    collection_mode: #mode_str.to_string(),
+                    field_name: #field_name_str.to_string(),
+                    collection_mode: #mode_description.to_string(),
                 }
             });
 
             // Collect field recording code for to_telemetry_event()
-            let accessor = quote! { self.#field_name };
-            let deref_accessor = quote! { self.#field_name };
+            let accessor = quote! { self.#field_ident };
+            let deref_accessor = quote! { self.#field_ident };
             // Struct fields need explicit borrowing for trait method calls
-            let ref_accessor = quote! { &self.#field_name };
+            let ref_accessor = quote! { &self.#field_ident };
             if let Some(code) =
-                generate_field_code(&accessor, &deref_accessor, &ref_accessor, &name_str, &field.ty, &mode)
+                generate_field_code(&accessor, &deref_accessor, &ref_accessor, &field_name_str, &field.ty, &mode)
             {
-                field_code.push(code);
+                field_recording_code.push(code);
             }
         }
     }
@@ -574,13 +624,13 @@ fn derive_for_struct(
                     return None;
                 }
                 let mut event = iam_policy_autopilot_common::telemetry::TelemetryEvent::new(#command_name);
-                #(#field_code)*
+                #(#field_recording_code)*
                 Some(event)
             }
 
             fn telemetry_fields() -> Vec<iam_policy_autopilot_common::telemetry::TelemetryFieldInfo> {
                 vec![
-                    #(#struct_field_info,)*
+                    #(#field_info_entries,)*
                 ]
             }
 
@@ -590,7 +640,7 @@ fn derive_for_struct(
         }
     };
 
-    Ok(expanded.into())
+    Ok(expanded)
 }
 
 // =============================================================================
@@ -600,398 +650,337 @@ fn derive_for_struct(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use syn::parse_quote;
 
-    // --- FieldMode Display tests ---
+    // --- Shared test helper ---
 
-    #[test]
-    fn field_mode_display_skip() {
-        assert_eq!(FieldMode::Skip.to_string(), "not collected");
-    }
-
-    #[test]
-    fn field_mode_display_value() {
-        assert_eq!(FieldMode::Value.to_string(), "actual value");
-    }
-
-    #[test]
-    fn field_mode_display_presence_no_default() {
-        assert_eq!(
-            FieldMode::Presence { default: None }.to_string(),
-            "presence (boolean)"
-        );
-    }
-
-    #[test]
-    fn field_mode_display_presence_with_default() {
-        assert_eq!(
-            FieldMode::Presence {
-                default: Some("x".to_string())
-            }
-            .to_string(),
-            "whether non-default (boolean)"
-        );
-    }
-
-    #[test]
-    fn field_mode_display_value_if_present() {
-        assert_eq!(
-            FieldMode::ValueIfPresent.to_string(),
-            "value if provided, omitted otherwise"
-        );
-    }
-
-    #[test]
-    fn field_mode_display_list() {
-        assert_eq!(
-            FieldMode::List.to_string(),
-            "list of values if non-empty, omitted otherwise"
-        );
-    }
-
-    // --- is_bool_type tests ---
-
-    #[test]
-    fn is_bool_type_returns_true_for_bool() {
-        let ty: syn::Type = parse_quote!(bool);
-        assert!(is_bool_type(&ty));
-    }
-
-    #[test]
-    fn is_bool_type_returns_false_for_string() {
-        let ty: syn::Type = parse_quote!(String);
-        assert!(!is_bool_type(&ty));
-    }
-
-    #[test]
-    fn is_bool_type_returns_false_for_option() {
-        let ty: syn::Type = parse_quote!(Option<bool>);
-        assert!(!is_bool_type(&ty));
-    }
-
-    #[test]
-    fn is_bool_type_returns_false_for_vec() {
-        let ty: syn::Type = parse_quote!(Vec<String>);
-        assert!(!is_bool_type(&ty));
-    }
-
-    // --- meta_ident_name tests ---
-
-    #[test]
-    fn meta_ident_name_for_path() {
-        let meta: Meta = parse_quote!(skip);
-        assert_eq!(meta_ident_name(&meta), Some("skip".to_string()));
-    }
-
-    #[test]
-    fn meta_ident_name_for_name_value() {
-        let meta: Meta = parse_quote!(command = "foo");
-        assert_eq!(meta_ident_name(&meta), Some("command".to_string()));
-    }
-
-    #[test]
-    fn meta_ident_name_for_list() {
-        let meta: Meta = parse_quote!(something(a, b));
-        assert_eq!(meta_ident_name(&meta), Some("something".to_string()));
-    }
-
-    // --- parse_container_attrs tests ---
-
+    /// Create a `#[telemetry(...)]` attribute with the given token content.
     fn make_telemetry_attr(tokens: proc_macro2::TokenStream) -> syn::Attribute {
         parse_quote!(#[telemetry(#tokens)])
     }
 
-    #[test]
-    fn parse_container_attrs_empty() {
-        let attrs: Vec<syn::Attribute> = vec![];
-        let result = parse_container_attrs(&attrs).unwrap();
-        assert!(!result.skip);
-        assert!(!result.skip_notice);
-        assert!(result.command.is_none());
+    // =========================================================================
+    // FieldMode::Display — parameterized over all variants
+    // =========================================================================
+
+    #[rstest]
+    #[case::skip(FieldMode::Skip, "not collected")]
+    #[case::value(FieldMode::Value, "actual value")]
+    #[case::presence(FieldMode::Presence { default: None }, "presence (boolean)")]
+    #[case::presence_with_default(
+        FieldMode::Presence { default: Some("x".to_string()) },
+        "whether non-default (boolean)"
+    )]
+    #[case::value_if_present(FieldMode::ValueIfPresent, "value if provided, omitted otherwise")]
+    #[case::list(FieldMode::List, "list of values if non-empty, omitted otherwise")]
+    fn field_mode_display(#[case] mode: FieldMode, #[case] expected: &str) {
+        assert_eq!(mode.to_string(), expected);
     }
 
-    #[test]
-    fn parse_container_attrs_skip() {
-        let attrs = vec![make_telemetry_attr(quote!(skip))];
-        let result = parse_container_attrs(&attrs).unwrap();
-        assert!(result.skip);
-        assert!(!result.skip_notice);
+    // =========================================================================
+    // is_bool_type — parameterized over common types
+    // =========================================================================
+
+    #[rstest]
+    #[case::bool_type("bool", true)]
+    #[case::string_type("String", false)]
+    #[case::option_bool("Option<bool>", false)]
+    #[case::vec_string("Vec<String>", false)]
+    #[case::i32_type("i32", false)]
+    fn is_bool_type_detection(#[case] type_str: &str, #[case] expected: bool) {
+        let ty: syn::Type = syn::parse_str(type_str).expect("valid type");
+        assert_eq!(is_bool_type(&ty), expected, "is_bool_type({type_str})");
     }
 
-    #[test]
-    fn parse_container_attrs_skip_notice() {
-        let attrs = vec![make_telemetry_attr(quote!(skip_notice))];
-        let result = parse_container_attrs(&attrs).unwrap();
-        assert!(!result.skip);
-        assert!(result.skip_notice);
-    }
+    // =========================================================================
+    // meta_ident_name — parameterized over Meta variants
+    // =========================================================================
 
-    #[test]
-    fn parse_container_attrs_command() {
-        let attrs = vec![make_telemetry_attr(quote!(command = "my-cmd"))];
-        let result = parse_container_attrs(&attrs).unwrap();
-        assert_eq!(result.command, Some("my-cmd".to_string()));
-    }
-
-    #[test]
-    fn parse_container_attrs_combined() {
-        let attrs = vec![make_telemetry_attr(quote!(skip_notice, command = "mcp-server"))];
-        let result = parse_container_attrs(&attrs).unwrap();
-        assert!(result.skip_notice);
-        assert_eq!(result.command, Some("mcp-server".to_string()));
-    }
-
-    #[test]
-    fn parse_container_attrs_ignores_non_telemetry() {
-        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[serde(rename_all = "PascalCase")])];
-        let result = parse_container_attrs(&attrs).unwrap();
-        assert!(!result.skip);
-        assert!(result.command.is_none());
-    }
-
-    #[test]
-    fn parse_container_attrs_unknown_keyword_errors() {
-        let attrs = vec![make_telemetry_attr(quote!(bogus))];
-        let result = parse_container_attrs(&attrs);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("unknown telemetry container attribute `bogus`"),
-            "error should mention the unknown attribute: {msg}"
+    #[rstest]
+    #[case::path("skip", "skip")]
+    #[case::name_value("command = \"foo\"", "command")]
+    #[case::list("something(a, b)", "something")]
+    fn meta_ident_name_extraction(#[case] input: &str, #[case] expected: &str) {
+        let meta: Meta = syn::parse_str(input).expect("valid meta");
+        assert_eq!(
+            meta_ident_name(&meta),
+            Some(expected.to_string()),
+            "meta_ident_name for `{input}`"
         );
     }
 
-    // --- parse_field_mode tests ---
+    // =========================================================================
+    // parse_container_attrs — valid cases
+    // =========================================================================
 
-    #[test]
-    fn parse_field_mode_no_attrs_returns_skip() {
-        let attrs: Vec<syn::Attribute> = vec![];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::Skip));
+    #[rstest]
+    #[case::empty(vec![], false, false, None)]
+    #[case::skip(
+        vec![make_telemetry_attr(quote!(skip))],
+        true, false, None
+    )]
+    #[case::skip_notice(
+        vec![make_telemetry_attr(quote!(skip_notice))],
+        false, true, None
+    )]
+    #[case::command(
+        vec![make_telemetry_attr(quote!(command = "my-cmd"))],
+        false, false, Some("my-cmd".to_string())
+    )]
+    #[case::combined(
+        vec![make_telemetry_attr(quote!(skip_notice, command = "mcp-server"))],
+        false, true, Some("mcp-server".to_string())
+    )]
+    fn parse_container_attrs_valid(
+        #[case] attrs: Vec<syn::Attribute>,
+        #[case] expect_skip: bool,
+        #[case] expect_skip_notice: bool,
+        #[case] expect_command: Option<String>,
+    ) {
+        let result = parse_container_attrs(&attrs).expect("should parse successfully");
+        assert_eq!(result.skip, expect_skip, "skip mismatch");
+        assert_eq!(result.skip_notice, expect_skip_notice, "skip_notice mismatch");
+        assert_eq!(result.command, expect_command, "command mismatch");
     }
 
     #[test]
-    fn parse_field_mode_skip() {
-        let attrs = vec![make_telemetry_attr(quote!(skip))];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::Skip));
+    fn parse_container_attrs_ignores_non_telemetry_attributes() {
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[serde(rename_all = "PascalCase")])];
+        let result = parse_container_attrs(&attrs).expect("should parse successfully");
+        assert!(!result.skip);
+        assert!(result.command.is_none());
     }
 
     #[test]
-    fn parse_field_mode_value() {
-        let attrs = vec![make_telemetry_attr(quote!(value))];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::Value));
+    fn parse_container_attrs_rejects_unknown_keyword() {
+        let attrs = vec![make_telemetry_attr(quote!(bogus))];
+        let err = parse_container_attrs(&attrs).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown telemetry container attribute `bogus`"),
+            "error should mention the unknown attribute: {err}"
+        );
     }
 
-    #[test]
-    fn parse_field_mode_presence() {
-        let attrs = vec![make_telemetry_attr(quote!(presence))];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::Presence { default: None }));
-    }
+    // =========================================================================
+    // parse_field_mode — valid cases
+    // =========================================================================
 
-    #[test]
-    fn parse_field_mode_presence_with_default() {
-        let attrs = vec![make_telemetry_attr(quote!(presence, default = "us-east-1"))];
-        let mode = parse_field_mode(&attrs).unwrap();
-        match mode {
-            FieldMode::Presence { default: Some(val) } => {
-                assert_eq!(val, "us-east-1");
+    /// Helper to express expected `FieldMode` variants as strings for `rstest` cases,
+    /// since `FieldMode` doesn't implement `PartialEq`.
+    fn assert_field_mode_matches(mode: &FieldMode, expected_pattern: &str) {
+        match (mode, expected_pattern) {
+            (FieldMode::Skip, "Skip") => {}
+            (FieldMode::Value, "Value") => {}
+            (FieldMode::Presence { default: None }, "Presence(None)") => {}
+            (FieldMode::Presence { default: Some(val) }, expected) if expected.starts_with("Presence(Some(") => {
+                let expected_val = expected
+                    .strip_prefix("Presence(Some(")
+                    .and_then(|s| s.strip_suffix("))"))
+                    .expect("malformed expected pattern");
+                assert_eq!(val, expected_val, "default value mismatch");
             }
-            _ => panic!("expected Presence with default, got: {mode}"),
+            (FieldMode::ValueIfPresent, "ValueIfPresent") => {}
+            (FieldMode::List, "List") => {}
+            _ => panic!("FieldMode {mode:?} did not match expected pattern `{expected_pattern}`"),
         }
     }
 
-    #[test]
-    fn parse_field_mode_value_if_present() {
-        let attrs = vec![make_telemetry_attr(quote!(value, if_present))];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::ValueIfPresent));
+    #[rstest]
+    #[case::no_attrs(vec![], "Skip")]
+    #[case::skip(vec![make_telemetry_attr(quote!(skip))], "Skip")]
+    #[case::value(vec![make_telemetry_attr(quote!(value))], "Value")]
+    #[case::presence(vec![make_telemetry_attr(quote!(presence))], "Presence(None)")]
+    #[case::presence_with_default(
+        vec![make_telemetry_attr(quote!(presence, default = "us-east-1"))],
+        "Presence(Some(us-east-1))"
+    )]
+    #[case::value_if_present(
+        vec![make_telemetry_attr(quote!(value, if_present))],
+        "ValueIfPresent"
+    )]
+    #[case::list(vec![make_telemetry_attr(quote!(list))], "List")]
+    #[case::skip_takes_priority(
+        vec![make_telemetry_attr(quote!(skip, value))],
+        "Skip"
+    )]
+    fn parse_field_mode_valid(
+        #[case] attrs: Vec<syn::Attribute>,
+        #[case] expected: &str,
+    ) {
+        let mode = parse_field_mode(&attrs).expect("should parse successfully");
+        assert_field_mode_matches(&mode, expected);
     }
 
     #[test]
-    fn parse_field_mode_list() {
-        let attrs = vec![make_telemetry_attr(quote!(list))];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::List));
-    }
-
-    #[test]
-    fn parse_field_mode_skip_takes_priority() {
-        // Even if both skip and value are present, skip wins
-        let attrs = vec![make_telemetry_attr(quote!(skip, value))];
-        let mode = parse_field_mode(&attrs).unwrap();
+    fn parse_field_mode_ignores_non_telemetry_attributes() {
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[serde(rename = "Foo")])];
+        let mode = parse_field_mode(&attrs).expect("should parse");
         assert!(matches!(mode, FieldMode::Skip));
     }
 
     #[test]
-    fn parse_field_mode_unknown_keyword_errors() {
+    fn parse_field_mode_rejects_unknown_keyword() {
         let attrs = vec![make_telemetry_attr(quote!(foobar))];
-        let result = parse_field_mode(&attrs);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let err = parse_field_mode(&attrs).unwrap_err().to_string();
         assert!(
-            msg.contains("unknown telemetry field attribute `foobar`"),
-            "error should mention the unknown attribute: {msg}"
+            err.contains("unknown telemetry field attribute `foobar`"),
+            "error should mention the unknown attribute: {err}"
         );
     }
 
-    #[test]
-    fn parse_field_mode_ignores_non_telemetry_attrs() {
-        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[serde(rename = "Foo")])];
-        let mode = parse_field_mode(&attrs).unwrap();
-        assert!(matches!(mode, FieldMode::Skip));
-    }
+    // =========================================================================
+    // wildcard_pattern — parameterized over field shapes
+    // =========================================================================
 
-    // --- wildcard_pattern tests ---
-
-    #[test]
-    fn wildcard_pattern_named_fields() {
+    #[rstest]
+    #[case::named(
+        Fields::Named(parse_quote!({ x: i32, y: String })),
+        "Commands :: Generate { .. }"
+    )]
+    #[case::unnamed(
+        Fields::Unnamed(parse_quote!((String))),
+        "Commands :: Generate (..)"
+    )]
+    #[case::unit(Fields::Unit, "Commands :: Generate")]
+    fn wildcard_pattern_for_field_shapes(
+        #[case] fields: Fields,
+        #[case] expected: &str,
+    ) {
         let enum_name: syn::Ident = parse_quote!(Commands);
         let variant_name: syn::Ident = parse_quote!(Generate);
-        let fields: Fields = Fields::Named(parse_quote!({ x: i32, y: String }));
-
         let pattern = wildcard_pattern(&enum_name, &variant_name, &fields);
-        let expected = quote!(Commands::Generate { .. });
-        assert_eq!(pattern.to_string(), expected.to_string());
+        assert_eq!(pattern.to_string(), expected);
     }
 
-    #[test]
-    fn wildcard_pattern_unnamed_fields() {
-        let enum_name: syn::Ident = parse_quote!(Commands);
-        let variant_name: syn::Ident = parse_quote!(Internal);
-        let fields: Fields = Fields::Unnamed(parse_quote!((String)));
+    // =========================================================================
+    // generate_field_code — parameterized over FieldMode variants
+    // =========================================================================
 
-        let pattern = wildcard_pattern(&enum_name, &variant_name, &fields);
-        let expected = quote!(Commands::Internal(..));
-        assert_eq!(pattern.to_string(), expected.to_string());
+    /// Test case definition for `generate_field_code` parameterized tests.
+    struct FieldCodeTestCase {
+        mode: FieldMode,
+        field_type: &'static str,
+        expected_output: Option<&'static str>, // None = should return None; Some(needle) = output should contain needle
     }
 
-    #[test]
-    fn wildcard_pattern_unit() {
-        let enum_name: syn::Ident = parse_quote!(Commands);
-        let variant_name: syn::Ident = parse_quote!(Help);
+    #[rstest]
+    #[case::skip(FieldCodeTestCase {
+        mode: FieldMode::Skip,
+        field_type: "String",
+        expected_output: None,
+    })]
+    #[case::value_bool(FieldCodeTestCase {
+        mode: FieldMode::Value,
+        field_type: "bool",
+        expected_output: Some("with_bool"),
+    })]
+    #[case::value_string(FieldCodeTestCase {
+        mode: FieldMode::Value,
+        field_type: "String",
+        expected_output: Some("with_str"),
+    })]
+    #[case::presence(FieldCodeTestCase {
+        mode: FieldMode::Presence { default: None },
+        field_type: "Vec<String>",
+        expected_output: Some("with_telemetry_presence"),
+    })]
+    #[case::presence_with_default(FieldCodeTestCase {
+        mode: FieldMode::Presence { default: Some("us-east-1".to_string()) },
+        field_type: "String",
+        expected_output: Some("us-east-1"),
+    })]
+    #[case::value_if_present(FieldCodeTestCase {
+        mode: FieldMode::ValueIfPresent,
+        field_type: "Option<String>",
+        expected_output: Some("Some"),
+    })]
+    #[case::list(FieldCodeTestCase {
+        mode: FieldMode::List,
+        field_type: "Option<Vec<String>>",
+        expected_output: Some("with_list"),
+    })]
+    fn generate_field_code_for_mode(#[case] test_case: FieldCodeTestCase) {
+        let accessor = quote!(self.field);
+        let deref_accessor = quote!(self.field);
+        let ref_accessor = quote!(&self.field);
+        let field_type: syn::Type =
+            syn::parse_str(test_case.field_type).expect("valid type");
 
-        let pattern = wildcard_pattern(&enum_name, &variant_name, &Fields::Unit);
-        let expected = quote!(Commands::Help);
-        assert_eq!(pattern.to_string(), expected.to_string());
-    }
-
-    // --- generate_field_code tests ---
-
-    #[test]
-    fn generate_field_code_skip_returns_none() {
-        let accessor = quote!(field);
-        let deref = quote!(*field);
-        let ref_acc = quote!(field);
-        let ty: syn::Type = parse_quote!(String);
-        assert!(generate_field_code(&accessor, &deref, &ref_acc, "field", &ty, &FieldMode::Skip).is_none());
-    }
-
-    #[test]
-    fn generate_field_code_value_bool_emits_with_bool() {
-        let accessor = quote!(self.pretty);
-        let deref = quote!(self.pretty);
-        let ref_acc = quote!(&self.pretty);
-        let ty: syn::Type = parse_quote!(bool);
-        let code = generate_field_code(&accessor, &deref, &ref_acc, "pretty", &ty, &FieldMode::Value)
-            .expect("should produce code");
-        let code_str = code.to_string();
-        assert!(
-            code_str.contains("with_bool"),
-            "bool value should use with_bool: {code_str}"
-        );
-    }
-
-    #[test]
-    fn generate_field_code_value_string_emits_with_str() {
-        let accessor = quote!(self.language);
-        let deref = quote!(self.language);
-        let ref_acc = quote!(&self.language);
-        let ty: syn::Type = parse_quote!(String);
-        let code = generate_field_code(&accessor, &deref, &ref_acc, "language", &ty, &FieldMode::Value)
-            .expect("should produce code");
-        let code_str = code.to_string();
-        assert!(
-            code_str.contains("with_str"),
-            "String value should use with_str: {code_str}"
-        );
-    }
-
-    #[test]
-    fn generate_field_code_presence_emits_with_telemetry_presence() {
-        let accessor = quote!(self.files);
-        let deref = quote!(self.files);
-        let ref_acc = quote!(&self.files);
-        let ty: syn::Type = parse_quote!(Vec<String>);
-        let code = generate_field_code(
+        let result = generate_field_code(
             &accessor,
-            &deref,
-            &ref_acc,
-            "files",
-            &ty,
-            &FieldMode::Presence { default: None },
-        )
-        .expect("should produce code");
-        let code_str = code.to_string();
-        assert!(
-            code_str.contains("with_telemetry_presence"),
-            "presence should use with_telemetry_presence: {code_str}"
+            &deref_accessor,
+            &ref_accessor,
+            "field",
+            &field_type,
+            &test_case.mode,
         );
+
+        match test_case.expected_output {
+            None => {
+                assert!(
+                    result.is_none(),
+                    "FieldMode::{:?} should produce no code",
+                    test_case.mode
+                );
+            }
+            Some(needle) => {
+                let code_str = result
+                    .unwrap_or_else(|| panic!("FieldMode::{:?} should produce code", test_case.mode))
+                    .to_string();
+                assert!(
+                    code_str.contains(needle),
+                    "FieldMode::{:?} output should contain `{needle}`, got: {code_str}",
+                    test_case.mode
+                );
+            }
+        }
     }
 
-    #[test]
-    fn generate_field_code_presence_with_default_emits_comparison() {
-        let accessor = quote!(self.region);
-        let deref = quote!(self.region);
-        let ref_acc = quote!(&self.region);
-        let ty: syn::Type = parse_quote!(String);
-        let code = generate_field_code(
-            &accessor,
-            &deref,
-            &ref_acc,
-            "region",
-            &ty,
-            &FieldMode::Presence {
-                default: Some("us-east-1".to_string()),
-            },
-        )
-        .expect("should produce code");
-        let code_str = code.to_string();
-        assert!(
-            code_str.contains("with_bool") && code_str.contains("us-east-1"),
-            "presence with default should compare against default: {code_str}"
-        );
+    // =========================================================================
+    // friendly_type_name — parameterized over common types
+    // =========================================================================
+
+    #[rstest]
+    #[case::bool_type("bool", "boolean")]
+    #[case::string_type("String", "string")]
+    #[case::u32_type("u32", "u32")]
+    #[case::i64_type("i64", "i64")]
+    #[case::f64_type("f64", "f64")]
+    #[case::usize_type("usize", "usize")]
+    #[case::custom_struct("MyStruct", "MyStruct")]
+    fn friendly_type_name_mapping(#[case] type_str: &str, #[case] expected: &str) {
+        let ty: syn::Type = syn::parse_str(type_str).expect("valid type");
+        assert_eq!(friendly_type_name(&ty), expected, "friendly_type_name({type_str})");
     }
 
-    #[test]
-    fn generate_field_code_value_if_present_emits_option_match() {
-        let accessor = quote!(self.region);
-        let deref = quote!(self.region);
-        let ref_acc = quote!(&self.region);
-        let ty: syn::Type = parse_quote!(Option<String>);
-        let code = generate_field_code(&accessor, &deref, &ref_acc, "region", &ty, &FieldMode::ValueIfPresent)
-            .expect("should produce code");
-        let code_str = code.to_string();
-        assert!(
-            code_str.contains("Some"),
-            "value_if_present should match on Some: {code_str}"
-        );
-    }
+    // =========================================================================
+    // collection_mode_description — type-aware mode descriptions
+    // =========================================================================
 
-    #[test]
-    fn generate_field_code_list_emits_list_check() {
-        let accessor = quote!(self.hints);
-        let deref = quote!(self.hints);
-        let ref_acc = quote!(&self.hints);
-        let ty: syn::Type = parse_quote!(Option<Vec<String>>);
-        let code = generate_field_code(&accessor, &deref, &ref_acc, "hints", &ty, &FieldMode::List)
-            .expect("should produce code");
-        let code_str = code.to_string();
-        assert!(
-            code_str.contains("with_list") && code_str.contains("is_empty"),
-            "list should check non-empty and use with_list: {code_str}"
+    #[rstest]
+    #[case::value_bool(FieldMode::Value, "bool", "actual value (boolean)")]
+    #[case::value_string(FieldMode::Value, "String", "actual value (string)")]
+    #[case::value_u32(FieldMode::Value, "u32", "actual value (u32)")]
+    #[case::skip(FieldMode::Skip, "String", "not collected")]
+    #[case::presence(FieldMode::Presence { default: None }, "Vec<String>", "presence (boolean)")]
+    #[case::presence_with_default(
+        FieldMode::Presence { default: Some("x".to_string()) },
+        "String",
+        "whether non-default (boolean)"
+    )]
+    #[case::value_if_present(FieldMode::ValueIfPresent, "Option<String>", "value if provided, omitted otherwise")]
+    #[case::list(FieldMode::List, "Option<Vec<String>>", "list of values if non-empty, omitted otherwise")]
+    fn collection_mode_description_with_type(
+        #[case] mode: FieldMode,
+        #[case] type_str: &str,
+        #[case] expected: &str,
+    ) {
+        let ty: syn::Type = syn::parse_str(type_str).expect("valid type");
+        assert_eq!(
+            collection_mode_description(&mode, &ty),
+            expected,
+            "collection_mode_description({mode:?}, {type_str})"
         );
     }
 }

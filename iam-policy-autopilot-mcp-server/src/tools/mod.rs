@@ -125,10 +125,12 @@ mod telemetry_doc_sync_tests {
                 if field.collection_mode == "not collected" {
                     continue;
                 }
-                let field_row = format!("| `{}` |", field.field_name);
+                // Validate both field name and collection mode appear in the same row
+                let field_row = format!("| `{}` | {} |", field.field_name, field.collection_mode);
                 assert!(
                     telemetry_md.contains(&field_row),
-                    "TELEMETRY.md missing field `{}` for MCP command `{}`",
+                    "TELEMETRY.md has incorrect or missing row for MCP field `{}` in command `{}`. \
+                     Expected row containing: {field_row}",
                     field.field_name,
                     command,
                 );

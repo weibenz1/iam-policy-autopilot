@@ -17,7 +17,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
-iam-policy-autopilot-telemetry-derive = { path = "../iam-policy-autopilot-telemetry-derive" }
+iam-policy-autopilot-proc-macros = { path = "../iam-policy-autopilot-proc-macros" }
 
 # AWS SigV4 signing for authenticated Lambda Function URL
 aws-config.workspace = true

@@ -6,36 +6,6 @@ IAM Policy Autopilot collects **anonymous, non-personally-identifiable** usage t
 
 Telemetry records **only** which commands and parameters are used, and whether the command succeeded. It **never** collects file paths, file contents, AWS account IDs, AWS regions, credentials, policy content, or any personally identifiable information.
 
-### Payload Format
-
-Every telemetry event is a JSON object with the following structure:
-
-```json
-{
-  "command": "generate-policies",
-  "version": "0.1.4",
-  "anonymous_id": "550e8400-e29b-41d4-a716-446655440000",
-  "params": {
-    "language": "python",
-    "pretty": true,
-    "source_files": true,
-    "service_hints": ["s3", "dynamodb"]
-  },
-  "result": {
-    "success": true,
-    "num_policies_generated": 2
-  }
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `command` | string | Which CLI command or MCP tool was used |
-| `version` | string | The version of IAM Policy Autopilot |
-| `anonymous_id` | string | A persistent UUID stored in `~/.iam-policy-autopilot/telemetry.json` |
-| `params` | object | Parameters used (see tables below) |
-| `result` | object | Outcome after execution (see tables below) |
-
 <!-- BEGIN AUTO-GENERATED TELEMETRY TABLE -->
 
 ### CLI: `generate-policies` Command
@@ -43,15 +13,15 @@ Every telemetry event is a JSON object with the following structure:
 | Parameter | What We Record |
 |-----------|---------------|
 | `source_files` | presence (boolean) |
-| `pretty` | actual value |
+| `pretty` | actual value (boolean) |
 | `language` | value if provided, omitted otherwise |
-| `full_output` | actual value |
+| `full_output` | actual value (boolean) |
 | `region` | whether non-default (boolean) |
 | `account` | whether non-default (boolean) |
-| `individual_policies` | actual value |
+| `individual_policies` | actual value (boolean) |
 | `upload_policies` | presence (boolean) |
-| `minimal_policy_size` | actual value |
-| `disable_cache` | actual value |
+| `minimal_policy_size` | actual value (boolean) |
+| `disable_cache` | actual value (boolean) |
 | `service_hints` | list of values if non-empty, omitted otherwise |
 | `explain` | list of values if non-empty, omitted otherwise |
 | `debug` | not collected |
@@ -61,13 +31,13 @@ Every telemetry event is a JSON object with the following structure:
 | Parameter | What We Record |
 |-----------|---------------|
 | `source` | presence (boolean) |
-| `yes` | actual value |
+| `yes` | actual value (boolean) |
 
 ### CLI: `mcp-server` Command
 
 | Parameter | What We Record |
 |-----------|---------------|
-| `transport` | actual value |
+| `transport` | actual value (McpTransport) |
 | `port` | not collected |
 
 ### MCP: `mcp-tool-generate-policies`
