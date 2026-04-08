@@ -1,6 +1,12 @@
 # Telemetry
 
-IAM Policy Autopilot collects **anonymous, non-personally-identifiable** usage telemetry to help the development team understand how the tool is used, prioritize feature development, and measure adoption.
+The collection of telemetry data for AWS IAM Policy Autopilot serves essential security and operational purposes that are strictly necessary for AWS to provide a secure and reliable authorization service.  IAM policies are fundamental to AWS's security infrastructure, controlling permissions and authorization across the entire platform.  When IAM Policy Autopilot malfunctions or generates incorrect permissions, it creates potential security issues that could expose customer resources to unauthorized access or denial of legitimate access. Specifically:
+
+* As a core security component, AWS must rapidly assess the scope of any authorization failures. Telemetry enables AWS to estimate how many users are affected and prioritize remediation accordingly.
+* High failure rates may indicate customers are inadvertently generating overly permissive policies. Real-time telemetry allows AWS to detect these patterns and intervene.
+* When authorization issues arise, usage data helps AWS understand the specific configurations involved, enabling targeted fixes that address root causes without disrupting unaffected users.
+
+Unlike optional features, IAM authorization is not a discretionary service component—it is the foundational security layer for all AWS resource access. To function safely, IAM Policy Autopilot collects anonymous telemetry data to monitor and respond to authorization failures.
 
 ## What Is Collected
 
@@ -86,19 +92,13 @@ Telemetry records **only** which commands and parameters are used, and whether t
 
 A persistent UUID v4 is stored in `~/.iam-policy-autopilot/config.json` as `installationId`. This allows counting unique installations across invocations without identifying individual users. The file also stores your telemetry preference (`telemetryChoice`).
 
-## How Data Is Transmitted
-
-Telemetry data is serialized as JSON, signed with AWS SigV4, and sent via an HTTPS POST request to a dedicated Lambda Function URL endpoint. The request includes a `Content-Type: application/json` header and an `IAMPolicyAutopilot/{version}` User-Agent header.
-
-Telemetry is emitted **after** command execution completes, so that result data (success/failure) can be included.
-
 ## How Data Is Stored
 
 Telemetry data is received by an AWS Lambda function, validated against a strict schema, and emitted as CloudWatch Embedded Metric Format (EMF) metrics. IP addresses are **not** logged or stored by the telemetry handler.
 
 ## Data Retention
 
-CloudWatch metrics are retained according to standard CloudWatch retention policies. Server-side Lambda execution logs are retained for a maximum of **3 years**, in accordance with standard AWS operational practices.
+The telemetry events are retained only for 60 days.
 
 ## How to Opt Out
 
