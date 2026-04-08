@@ -124,8 +124,8 @@ fn span_result_fields_documented_in_telemetry_md() {
         .filter(|e| {
             let path = e.path();
             path.extension().is_some_and(|ext| ext == "rs")
-                && !path.to_str().unwrap_or("").contains("/target/")
-                && !path.to_str().unwrap_or("").contains("/tests/")
+                && !path.components().any(|c| c.as_os_str() == "target")
+                && !path.components().any(|c| c.as_os_str() == "tests")
         })
     {
         let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
