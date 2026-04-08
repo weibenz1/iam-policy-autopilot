@@ -292,9 +292,18 @@ mod tests {
         let dir = home_dir();
         assert!(dir.is_some(), "home_dir() should resolve on CI runners");
         let path = dir.unwrap();
-        assert!(path.is_absolute(), "home directory should be an absolute path: {path:?}");
-        assert!(path.exists(), "home directory should exist on disk: {path:?}");
-        assert!(path.is_dir(), "home directory should be a directory: {path:?}");
+        assert!(
+            path.is_absolute(),
+            "home directory should be an absolute path: {path:?}"
+        );
+        assert!(
+            path.exists(),
+            "home directory should exist on disk: {path:?}"
+        );
+        assert!(
+            path.is_dir(),
+            "home directory should be a directory: {path:?}"
+        );
     }
 
     // =========================================================================
