@@ -28,6 +28,8 @@ rstest.workspace = true
 regex.workspace = true
 walkdir.workspace = true
 wiremock = "0.6"
+syn = { version = "2", features = ["full", "parsing", "visit"] }
+quote = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

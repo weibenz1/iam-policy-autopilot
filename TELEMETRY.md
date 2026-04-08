@@ -1,12 +1,6 @@
 # Telemetry
 
-The collection of telemetry data for AWS IAM Policy Autopilot serves essential security and operational purposes that are strictly necessary for AWS to provide a secure and reliable authorization service.  IAM policies are fundamental to AWS's security infrastructure, controlling permissions and authorization across the entire platform.  When IAM Policy Autopilot malfunctions or generates incorrect permissions, it creates potential security issues that could expose customer resources to unauthorized access or denial of legitimate access. Specifically:
-
-* As a core security component, AWS must rapidly assess the scope of any authorization failures. Telemetry enables AWS to estimate how many users are affected and prioritize remediation accordingly.
-* High failure rates may indicate customers are inadvertently generating overly permissive policies. Real-time telemetry allows AWS to detect these patterns and intervene.
-* When authorization issues arise, usage data helps AWS understand the specific configurations involved, enabling targeted fixes that address root causes without disrupting unaffected users.
-
-Unlike optional features, IAM authorization is not a discretionary service component—it is the foundational security layer for all AWS resource access. To function safely, IAM Policy Autopilot collects anonymous telemetry data to monitor and respond to authorization failures.
+AWS IAM Policy Autopilot is configured to collect telemetry to provide aggregate usage patterns and error frequencies that will help AWS identify widespread authorization issues affecting the AWS IAM Policy Autopilot usage base. AWS IAM Policy Autopilot telemetry is only collected in AWS IAM Policy Autopilot versions 0.2.0 and up. Users are opted in to IAM Policy Autopilot telemetry data collection by default, and you can opt out of telemetry collection by using any of the options listed below.
 
 ## What Is Collected
 
@@ -78,6 +72,8 @@ Telemetry records **only** which commands and parameters are used, and whether t
 
 <!-- END AUTO-GENERATED TELEMETRY TABLE -->
 
+<!-- BEGIN RESULT DATA TABLE -->
+
 ### Result Data (recorded after execution)
 
 | Field | Type | Description |
@@ -88,13 +84,11 @@ Telemetry records **only** which commands and parameters are used, and whether t
 | `detected_language` | string | Programming language detected from source files (e.g., "python", "go") |
 | `services_used` | string[] | AWS services found in the source code (e.g., ["s3", "dynamodb"]) |
 
+<!-- END RESULT DATA TABLE -->
+
 ### Installation ID
 
 A persistent UUID v4 is stored in `~/.iam-policy-autopilot/config.json` as `installationId`. This allows counting unique installations across invocations without identifying individual users. The file also stores your telemetry preference (`telemetryChoice`).
-
-## How Data Is Stored
-
-Telemetry data is received by an AWS Lambda function, validated against a strict schema, and emitted as CloudWatch Embedded Metric Format (EMF) metrics. IP addresses are **not** logged or stored by the telemetry handler.
 
 ## Data Retention
 
