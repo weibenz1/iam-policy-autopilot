@@ -84,8 +84,10 @@ jobs:
       matrix:
         target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
     steps:
-      - name: Enable long paths for Git
-        run: git config --system core.longpaths true
+      - name: Configure Git for Windows
+        run: |
+          git config --system core.longpaths true
+          git config --system core.autocrlf false
 
       - uses: actions/checkout@v4
         with:

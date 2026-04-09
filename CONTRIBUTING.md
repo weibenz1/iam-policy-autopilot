@@ -24,10 +24,11 @@ reported the issue. Please try to include as much information as you can. Detail
 
 ### Windows
 
-One git setting is required when working on Windows:
+The following git setting is required when working on Windows:
 
 ```powershell
 git config --global core.longpaths true
+git config --global core.autocrlf false
 ```
 
 - **`core.longpaths`** — the repository contains file paths that exceed Windows' default 260-character limit (inside the `aws-sdk-java-v2` submodule).
