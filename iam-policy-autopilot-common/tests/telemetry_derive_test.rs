@@ -48,7 +48,6 @@ impl Drop for EnvGuard {
 // Test fixtures (types)
 // =============================================================================
 
-#[allow(dead_code)]
 #[derive(TelemetryEventDerive)]
 enum TestCommands {
     #[telemetry(command = "generate-policies")]
@@ -60,6 +59,7 @@ enum TestCommands {
         #[telemetry(value)]
         language: String,
         #[telemetry(skip)]
+        #[allow(dead_code)]
         debug: bool,
         #[telemetry(value, if_present)]
         region: Option<String>,
@@ -69,6 +69,7 @@ enum TestCommands {
         default_region: String,
     },
 
+    #[allow(dead_code)]
     #[telemetry(skip)]
     Version { verbose: bool },
 
@@ -79,6 +80,7 @@ enum TestCommands {
     },
 
     // Bare variant — all fields unannotated → all skipped
+    #[allow(dead_code)]
     #[telemetry(command = "status")]
     Status { verbose: bool },
 
@@ -87,11 +89,11 @@ enum TestCommands {
     Help,
 
     // Tuple variant (skip)
+    #[allow(dead_code)]
     #[telemetry(skip)]
     Internal(String),
 }
 
-#[allow(dead_code)]
 #[derive(TelemetryEventDerive)]
 #[telemetry(command = "mcp-tool-generate")]
 struct TestMcpInput {
@@ -106,10 +108,10 @@ struct TestMcpInput {
     #[telemetry(presence)]
     account: Option<String>,
     // No telemetry attribute — should be skipped
+    #[allow(dead_code)]
     internal_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(TelemetryEventDerive)]
 #[telemetry(command = "mcp-tool-simple", skip_notice)]
 struct TestSkipNoticeStruct {
@@ -117,7 +119,6 @@ struct TestSkipNoticeStruct {
     name: String,
 }
 
-#[allow(dead_code)]
 #[derive(TelemetryEventDerive)]
 struct AutoNamedStruct {
     #[telemetry(value)]
