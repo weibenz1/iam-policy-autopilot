@@ -240,9 +240,13 @@ impl Location {
     }
 
     /// Format as GNU coding standard: `filename:startLine.startCol-endLine.endCol`
+    ///
+    /// Always uses forward slashes in the path, regardless of OS, to produce
+    /// consistent output on all platforms. GNU format uses `/` as the path separator.
     #[must_use]
     pub fn to_gnu_format(&self) -> String {
-        let path_str = self.file_path.display();
+        // Use forward slashes universally — PathBuf::display() uses `\` on Windows
+        let path_str = self.file_path.to_string_lossy().replace('\\', "/");
         let (start_line, start_col) = self.start_position;
         let (end_line, end_col) = self.end_position;
 
