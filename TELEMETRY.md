@@ -1,10 +1,10 @@
 # Telemetry
 
-AWS IAM Policy Autopilot is configured to collect telemetry to provide aggregate usage patterns and error frequencies that will help AWS identify widespread authorization issues affecting the AWS IAM Policy Autopilot usage base. AWS IAM Policy Autopilot telemetry is only collected in AWS IAM Policy Autopilot versions 0.2.0 and up. Users are opted in to IAM Policy Autopilot telemetry data collection by default, and you can opt out of telemetry collection by using any of the options listed below.
+AWS IAM Policy Autopilot is configured to collect telemetry to provide  usage patterns and error frequencies that will help AWS identify widespread authorization issues affecting the AWS IAM Policy Autopilot usage base. AWS IAM Policy Autopilot telemetry is only collected in AWS IAM Policy Autopilot versions 0.2.0 and up. Users are opted in to IAM Policy Autopilot telemetry data collection by default, and you can opt out of telemetry collection by using any of the options listed below.
 
 ## What Is Collected
 
-Telemetry records **only** which commands and parameters are used, and whether the command succeeded. It **never** collects file paths, file contents, AWS account IDs, AWS regions, credentials, policy content, or any personally identifiable information.
+Telemetry records **only** which commands and parameters are used, and whether the command succeeded. It **never** collects file paths, file contents, AWS account IDs, AWS regions, credentials, or policy content.
 
 <!-- BEGIN AUTO-GENERATED TELEMETRY TABLE -->
 
