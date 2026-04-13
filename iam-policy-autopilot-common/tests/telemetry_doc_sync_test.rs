@@ -112,11 +112,28 @@ fn span_result_fields_documented_in_telemetry_md() {
 
     let mut recorded_keys = HashSet::new();
     // Note: syn's to_token_stream() may insert spaces before `(`, so we use `\s*\(` instead of `\(`.
+    // Span-level recording functions + event-level setters with explicit string keys:
     let patterns = [
         regex::Regex::new(r#"record_result_str\s*\(\s*"([^"]+)""#).unwrap(),
         regex::Regex::new(r#"record_result_number\s*\(\s*"([^"]+)""#).unwrap(),
         regex::Regex::new(r#"record_result_set\s*\(\s*"([^"]+)""#).unwrap(),
+        regex::Regex::new(r#"set_result_str\s*\(\s*"([^"]+)""#).unwrap(),
+        regex::Regex::new(r#"set_result_number\s*\(\s*"([^"]+)""#).unwrap(),
+        regex::Regex::new(r#"set_result_list\s*\(\s*"([^"]+)""#).unwrap(),
+        regex::Regex::new(r#"with_result_str\s*\(\s*"([^"]+)""#).unwrap(),
+        regex::Regex::new(r#"with_result_list\s*\(\s*"([^"]+)""#).unwrap(),
     ];
+    // Dedicated methods with hardcoded result key names (no string-key argument)
+    let hardcoded_methods: &[(&str, &str)] = &[
+        (r"with_result_success\s*\(", "success"),
+        (r"set_result_success\s*\(", "success"),
+        (r"with_result_num_policies\s*\(", "num_policies_generated"),
+        (r"set_result_num_policies\s*\(", "num_policies_generated"),
+    ];
+    let hardcoded_patterns: Vec<(regex::Regex, &str)> = hardcoded_methods
+        .iter()
+        .map(|(pat, key)| (regex::Regex::new(pat).unwrap(), *key))
+        .collect();
 
     for entry in walkdir::WalkDir::new(workspace_root)
         .into_iter()
@@ -136,6 +153,11 @@ fn span_result_fields_documented_in_telemetry_md() {
                 recorded_keys.insert(cap[1].to_string());
             }
         }
+        for (pattern, key) in &hardcoded_patterns {
+            if pattern.is_match(&production_code) {
+                recorded_keys.insert(key.to_string());
+            }
+        }
     }
 
     assert!(
@@ -143,6 +165,7 @@ fn span_result_fields_documented_in_telemetry_md() {
         "Should find at least one record_result_* call in the workspace"
     );
 
+    // Direction 1 — code → doc: every key used in code is documented
     for key in &recorded_keys {
         assert!(
             result_section.contains(&format!("| `{key}` |")),
@@ -151,6 +174,27 @@ fn span_result_fields_documented_in_telemetry_md() {
              BEGIN/END RESULT DATA TABLE markers."
         );
     }
+
+    // Direction 2 — doc → code: every documented field exists in code
+    let doc_field_pattern = regex::Regex::new(r"(?m)^\|\s*`([^`]+)`\s*\|").unwrap();
+    let documented_fields: HashSet<String> = doc_field_pattern
+        .captures_iter(result_section)
+        .map(|cap| cap[1].to_string())
+        .collect();
+
+    assert!(
+        !documented_fields.is_empty(),
+        "Should find at least one field in the TELEMETRY.md Result Data table"
+    );
+
+    let stale_fields: Vec<&String> = documented_fields.difference(&recorded_keys).collect();
+
+    assert!(
+        stale_fields.is_empty(),
+        "TELEMETRY.md Result Data table documents fields not found in production code: {stale_fields:?}. \
+         Remove stale rows from the Result Data table or add the corresponding \
+         record_result_* / set_result_* calls in production code."
+    );
 }
 
 // =============================================================================

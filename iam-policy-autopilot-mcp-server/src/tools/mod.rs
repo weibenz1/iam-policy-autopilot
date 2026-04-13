@@ -85,7 +85,9 @@ pub(crate) use fix_access_denied::{FixAccessDeniedInput, FixAccessDeniedOutput};
 #[cfg(test)]
 mod telemetry_doc_sync_tests {
     use super::*;
-    use iam_policy_autopilot_common::telemetry::{TelemetryFieldInfo, ToTelemetryEvent};
+    use iam_policy_autopilot_common::telemetry::{
+        parse_doc_fields, TelemetryFieldInfo, ToTelemetryEvent,
+    };
     use std::collections::BTreeMap;
 
     fn collect_mcp_telemetry_fields() -> Vec<TelemetryFieldInfo> {
@@ -96,6 +98,8 @@ mod telemetry_doc_sync_tests {
         fields
     }
 
+    /// Verify that every MCP telemetry field is documented in TELEMETRY.md,
+    /// and vice-versa.
     #[test]
     fn test_mcp_telemetry_fields_documented_in_telemetry_md() {
         let fields = collect_mcp_telemetry_fields();
@@ -104,6 +108,7 @@ mod telemetry_doc_sync_tests {
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../TELEMETRY.md"))
                 .expect("Failed to read TELEMETRY.md");
 
+        // Direction 1 — code → doc: every code field is documented
         let mut by_command: BTreeMap<String, Vec<&TelemetryFieldInfo>> = BTreeMap::new();
         for field in &fields {
             by_command
@@ -112,18 +117,17 @@ mod telemetry_doc_sync_tests {
                 .push(field);
         }
 
-        for (command, fields) in &by_command {
+        for (command, cmd_fields) in &by_command {
             let header = format!("### MCP: `{command}`");
             assert!(
                 telemetry_md.contains(&header),
                 "TELEMETRY.md missing section: {header}"
             );
 
-            for field in fields {
+            for field in cmd_fields {
                 if field.collection_mode == "not collected" {
                     continue;
                 }
-                // Validate both field name and collection mode appear in the same row
                 let field_row = format!("| `{}` | {} |", field.field_name, field.collection_mode);
                 assert!(
                     telemetry_md.contains(&field_row),
@@ -134,5 +138,19 @@ mod telemetry_doc_sync_tests {
                 );
             }
         }
+
+        // Direction 2 — doc → code: every documented field exists in code
+        let code_fields: std::collections::HashSet<(String, String)> = fields
+            .iter()
+            .map(|f| (f.command.clone(), f.field_name.clone()))
+            .collect();
+        let doc_fields = parse_doc_fields(&telemetry_md, "MCP");
+
+        let stale: Vec<_> = doc_fields.difference(&code_fields).collect();
+        assert!(
+            stale.is_empty(),
+            "TELEMETRY.md documents MCP fields not found in code: {stale:?}. \
+             Remove stale rows or add the corresponding #[telemetry] annotations."
+        );
     }
 }

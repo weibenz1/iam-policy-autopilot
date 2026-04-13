@@ -28,6 +28,52 @@ pub use config::{
 };
 pub use event::TelemetryEvent;
 
+/// HTML comment markers that delimit the auto-generated parameter tables in TELEMETRY.md.
+const TELEMETRY_TABLE_BEGIN: &str = "<!-- BEGIN AUTO-GENERATED TELEMETRY TABLE -->";
+const TELEMETRY_TABLE_END: &str = "<!-- END AUTO-GENERATED TELEMETRY TABLE -->";
+
+/// Extract `(command, field_name)` pairs from TELEMETRY.md sections matching
+/// `### {header_prefix}: \`command\``.
+///
+/// Parses the auto-generated table between `BEGIN`/`END` markers and returns
+/// every `| \`field\` |` row paired with its enclosing command header.
+/// Used by doc-sync tests across crates to verify TELEMETRY.md ↔ code consistency.
+pub fn parse_doc_fields(
+    markdown: &str,
+    header_prefix: &str,
+) -> std::collections::HashSet<(String, String)> {
+    let start = markdown
+        .find(TELEMETRY_TABLE_BEGIN)
+        .expect("TELEMETRY.md missing BEGIN AUTO-GENERATED TELEMETRY TABLE marker")
+        + TELEMETRY_TABLE_BEGIN.len();
+    let end = markdown
+        .find(TELEMETRY_TABLE_END)
+        .expect("TELEMETRY.md missing END AUTO-GENERATED TELEMETRY TABLE marker");
+    let section = &markdown[start..end];
+
+    let prefix = format!("### {header_prefix}: `");
+    let mut current_command: Option<String> = None;
+    let mut fields = std::collections::HashSet::new();
+
+    for line in section.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            current_command = rest.split('`').next().map(String::from);
+        } else if trimmed.starts_with("### ") {
+            current_command = None;
+        }
+        if let Some(cmd) = &current_command {
+            if let Some(name) = trimmed
+                .strip_prefix("| `")
+                .and_then(|rest| rest.split('`').next())
+            {
+                fields.insert((cmd.clone(), name.to_string()));
+            }
+        }
+    }
+    fields
+}
+
 // Re-export the derive macro so users can write:
 //   use iam_policy_autopilot_common::telemetry::TelemetryEvent;  (the struct)
 //   use iam_policy_autopilot_common::telemetry::TelemetryEventDerive;  (the macro)

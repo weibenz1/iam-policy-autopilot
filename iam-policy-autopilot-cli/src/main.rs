@@ -870,12 +870,13 @@ fn print_cli_command_error(e: anyhow::Error) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
-    use iam_policy_autopilot_common::telemetry::ToTelemetryEvent;
+    use iam_policy_autopilot_common::telemetry::{parse_doc_fields, ToTelemetryEvent};
 
     /// Verify that every CLI telemetry field from the `Commands` enum is documented
-    /// in TELEMETRY.md. Fails if a `#[telemetry(...)]` annotation is added or
-    /// renamed without updating the doc.
+    /// in TELEMETRY.md, and vice-versa.
     #[test]
     fn test_cli_telemetry_fields_documented_in_telemetry_md() {
         let fields = Commands::telemetry_fields();
@@ -884,8 +885,8 @@ mod tests {
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../TELEMETRY.md"))
                 .expect("Failed to read TELEMETRY.md");
 
+        // Direction 1 — code → doc: every code field is documented
         for field in &fields {
-            // Skip fields with "not collected" mode — they're documented as not collected
             if field.collection_mode == "not collected" {
                 continue;
             }
@@ -896,7 +897,6 @@ mod tests {
                 "TELEMETRY.md missing section: {header}"
             );
 
-            // Validate both field name and collection mode appear in the same row
             let field_row = format!("| `{}` | {} |", field.field_name, field.collection_mode);
             assert!(
                 telemetry_md.contains(&field_row),
@@ -906,5 +906,19 @@ mod tests {
                 field.command,
             );
         }
+
+        // Direction 2 — doc → code: every documented field exists in code
+        let code_fields: HashSet<(String, String)> = fields
+            .iter()
+            .map(|f| (f.command.clone(), f.field_name.clone()))
+            .collect();
+        let doc_fields = parse_doc_fields(&telemetry_md, "CLI");
+
+        let stale: Vec<_> = doc_fields.difference(&code_fields).collect();
+        assert!(
+            stale.is_empty(),
+            "TELEMETRY.md documents CLI fields not found in code: {stale:?}. \
+             Remove stale rows or add the corresponding #[telemetry] annotations."
+        );
     }
 }
